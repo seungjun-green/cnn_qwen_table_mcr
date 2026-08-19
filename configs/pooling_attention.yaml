@@ -1,0 +1,5 @@
+cell_encoder:
+  pooling: attention
+training:
+  output_dir: outputs/pooling_attention
+

@@ -1,0 +1,5 @@
+cell_encoder:
+  pooling: max
+training:
+  output_dir: outputs/pooling_max
+

@@ -1,0 +1,20 @@
+experiment_type: serialized
+model:
+  name: Qwen/Qwen3-1.7B
+  freeze_backbone: false
+data:
+  dataset: stanfordnlp/wikitablequestions
+  revision: refs/pr/4
+  max_rows: 32
+  max_cols: 8
+  max_question_tokens: 4096
+training:
+  bf16: true
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  epochs: 3
+  seed: 42
+  output_dir: outputs/serialized_table
+generation:
+  max_new_tokens: 32

@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+@dataclass
+class ModelConfig:
+    name: str = "Qwen/Qwen3-1.7B"
+    freeze_backbone: bool = True
+    trust_remote_code: bool = False
+
+
+@dataclass
+class DataConfig:
+    dataset: str = "stanfordnlp/wikitablequestions"
+    revision: str = "refs/pr/4"
+    max_rows: int = 32
+    max_cols: int = 8
+    max_cell_tokens: int = 32
+    max_question_tokens: int = 256
+    max_answer_tokens: int = 64
+    num_workers: int = 0
+
+
+@dataclass
+class CellEncoderConfig:
+    pooling: str = "mean"
+    cell_dim: int = 256
+    mlp_type: str = "single"
+    deep_hidden_dim: int = 512
+
+
+@dataclass
+class CNNConfig:
+    channels: int = 256
+    depth: int = 2
+    kernel_size: int = 3
+    residual: bool = True
+
+
+@dataclass
+class CrossAttentionConfig:
+    insertion_layer: int = 13
+    num_heads: int = 8
+    gate_init: float = 0.1
+    dropout: float = 0.0
+
+
+@dataclass
+class TrainingConfig:
+    bf16: bool = True
+    batch_size: int = 1
+    eval_batch_size: int = 1
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 1.0e-4
+    weight_decay: float = 0.01
+    max_grad_norm: float = 1.0
+    epochs: int = 3
+    seed: int = 42
+    log_every: int = 20
+    eval_every_epochs: int = 1
+    max_train_examples: int | None = None
+    max_validation_examples: int | None = None
+    output_dir: str = "outputs/baseline"
+    mirror_output_dir: str | None = None
+
+
+@dataclass
+class GenerationConfig:
+    max_new_tokens: int = 32
+
+
+@dataclass
+class ExperimentConfig:
+    experiment_type: str = "cnn"
+    model: ModelConfig = field(default_factory=ModelConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    cell_encoder: CellEncoderConfig = field(default_factory=CellEncoderConfig)
+    cnn: CNNConfig = field(default_factory=CNNConfig)
+    cross_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def validate(self) -> None:
+        if self.experiment_type not in {"cnn", "serialized"}:
+            raise ValueError("experiment_type must be 'cnn' or 'serialized'")
+        if self.cell_encoder.pooling not in {"mean", "max", "attention"}:
+            raise ValueError("cell_encoder.pooling must be mean, max, or attention")
+        if self.cell_encoder.mlp_type not in {"single", "deep"}:
+            raise ValueError("cell_encoder.mlp_type must be single or deep")
+        if self.cell_encoder.cell_dim not in {128, 256, 512}:
+            raise ValueError("cell_encoder.cell_dim must be 128, 256, or 512")
+        if self.cnn.depth not in {2, 4, 6}:
+            raise ValueError("cnn.depth must be 2, 4, or 6")
+        if self.cnn.kernel_size not in {3, 5}:
+            raise ValueError("cnn.kernel_size must be 3 or 5")
+        if self.data.max_rows < 1 or self.data.max_cols < 1:
+            raise ValueError("max_rows and max_cols must be positive")
+        if not 0 <= self.cross_attention.gate_init < 1:
+            raise ValueError("gate_init must be in [0, 1)")
+
+
+_SECTIONS: dict[str, type[Any]] = {
+    "model": ModelConfig,
+    "data": DataConfig,
+    "cell_encoder": CellEncoderConfig,
+    "cnn": CNNConfig,
+    "cross_attention": CrossAttentionConfig,
+    "training": TrainingConfig,
+    "generation": GenerationConfig,
+}
+
+
+def _strict_dataclass(cls: type[Any], values: dict[str, Any], section: str) -> Any:
+    valid = cls.__dataclass_fields__.keys()
+    unknown = set(values) - set(valid)
+    if unknown:
+        raise ValueError(f"Unknown keys in {section}: {sorted(unknown)}")
+    return cls(**values)
+
+
+def load_config(path: str | Path) -> ExperimentConfig:
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as handle:
+        raw = yaml.safe_load(handle) or {}
+    allowed = {"experiment_type", *_SECTIONS}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(f"Unknown top-level config keys: {sorted(unknown)}")
+    kwargs: dict[str, Any] = {"experiment_type": raw.get("experiment_type", "cnn")}
+    for name, cls in _SECTIONS.items():
+        kwargs[name] = _strict_dataclass(cls, raw.get(name, {}), name)
+    config = ExperimentConfig(**kwargs)
+    config.validate()
+    return config
+
+
+def save_config(config: ExperimentConfig, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config.to_dict(), handle, sort_keys=False)

@@ -1,0 +1,6 @@
+data:
+  max_rows: 16
+  max_cols: 8
+training:
+  output_dir: outputs/grid_16x8
+

@@ -1,0 +1,5 @@
+cell_encoder:
+  pooling: mean
+training:
+  output_dir: outputs/pooling_mean
+

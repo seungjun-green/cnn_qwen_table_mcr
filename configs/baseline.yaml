@@ -1,0 +1,40 @@
+experiment_type: cnn
+
+model:
+  name: Qwen/Qwen3-1.7B
+  freeze_backbone: true
+
+data:
+  dataset: stanfordnlp/wikitablequestions
+  revision: refs/pr/4
+  max_rows: 32
+  max_cols: 8
+
+cell_encoder:
+  pooling: mean
+  cell_dim: 256
+  mlp_type: single
+
+cnn:
+  channels: 256
+  depth: 2
+  kernel_size: 3
+  residual: true
+
+cross_attention:
+  insertion_layer: 13
+  num_heads: 8
+  gate_init: 0.1
+
+training:
+  bf16: true
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
+  epochs: 3
+  seed: 42
+  output_dir: outputs/baseline
+
+generation:
+  max_new_tokens: 32
+

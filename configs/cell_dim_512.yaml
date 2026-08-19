@@ -1,0 +1,7 @@
+cell_encoder:
+  cell_dim: 512
+cnn:
+  channels: 512
+training:
+  output_dir: outputs/cell_dim_512
+
