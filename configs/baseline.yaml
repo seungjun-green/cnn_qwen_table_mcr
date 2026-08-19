@@ -33,8 +33,11 @@ training:
   learning_rate: 1.0e-4
   epochs: 3
   seed: 42
+  checkpoint_every_steps: 100
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0
+  auto_resume: true
   output_dir: outputs/baseline
 
 generation:
   max_new_tokens: 32
-

@@ -1,0 +1,5 @@
+cnn:
+  depth: 4
+training:
+  output_dir: outputs/cnn_depth_4
+

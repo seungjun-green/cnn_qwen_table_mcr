@@ -4,15 +4,18 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
+from src.checkpointing import load_training_checkpoint, save_training_checkpoint
 from src.config import ExperimentConfig, load_config
 from src.data import MRCBatchCollator, Table, truncate_table
 from src.model import TableCNNQwen
 from src.pooling import TokenPooler
+from src.train import train_model
 from src.utils import mirror_directory
 
 
@@ -99,6 +102,46 @@ class DummyLM(nn.Module):
 
 
 class ComponentTests(unittest.TestCase):
+    def test_full_checkpoint_restores_model_optimizer_and_progress(self):
+        config = ExperimentConfig()
+        model = nn.Linear(3, 2)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        loss = model(torch.ones(1, 3)).sum()
+        loss.backward()
+        optimizer.step()
+        expected_weight = model.weight.detach().clone()
+        history = {"epochs": [], "loss_history": [{"loss": 1.0}]}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            checkpoint_path = Path(temporary_directory) / "checkpoint_last.pt"
+            save_training_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                config,
+                epoch=2,
+                next_batch_index=17,
+                global_step=23,
+                history=history,
+                best_metric=0.25,
+                epochs_without_improvement=1,
+                epoch_loss_sum=9.5,
+                epoch_batches_seen=17,
+            )
+            with torch.no_grad():
+                model.weight.zero_()
+            restored = load_training_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                config,
+                torch.device("cpu"),
+            )
+            self.assertTrue(torch.equal(model.weight, expected_weight))
+            self.assertEqual(restored["epoch"], 2)
+            self.assertEqual(restored["next_batch_index"], 17)
+            self.assertEqual(restored["global_step"], 23)
+            self.assertEqual(restored["optimizer_state"]["state"].keys(), {0, 1})
+
     def test_output_directory_mirroring(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -115,6 +158,11 @@ class ComponentTests(unittest.TestCase):
             )
             self.assertTrue(
                 (destination / "validation_epoch_1" / "metrics.json").is_file()
+            )
+            (source / "checkpoint_last.pt").write_bytes(b"new-checkpoint")
+            mirror_directory(source, destination)
+            self.assertEqual(
+                (destination / "checkpoint_last.pt").read_bytes(), b"new-checkpoint"
             )
 
     def test_pooling_masks(self):
@@ -189,6 +237,63 @@ class ComponentTests(unittest.TestCase):
             max_new_tokens=2,
         )
         self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
+
+    def test_early_stopping_and_automatic_completed_run_resume(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig()
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_cell_tokens = 4
+        config.cell_encoder.cell_dim = 128
+        config.cnn.channels = 128
+        config.cross_attention.insertion_layer = 1
+        config.cross_attention.num_heads = 4
+        config.training.bf16 = False
+        config.training.batch_size = 1
+        config.training.gradient_accumulation_steps = 1
+        config.training.epochs = 3
+        config.training.checkpoint_every_steps = 1
+        config.training.early_stopping_patience = 1
+        config.training.log_every = 1
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        fake_metrics = {
+            "exact_match": 0.5,
+            "number_evaluated": 1,
+            "number_correct": 0,
+            "accuracy": 0.5,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config.training.output_dir = temporary_directory
+            with patch("src.train.evaluate_model", return_value=(fake_metrics, [])):
+                model = TableCNNQwen(DummyLM(), tokenizer, config)
+                history = train_model(
+                    model,
+                    tokenizer,
+                    [example],
+                    [example],
+                    config,
+                    torch.device("cpu"),
+                )
+                self.assertEqual(history["status"], "early_stopped")
+                self.assertEqual(len(history["epochs"]), 2)
+                self.assertTrue(
+                    (Path(temporary_directory) / "checkpoint_best.pt").is_file()
+                )
+                resumed_model = TableCNNQwen(DummyLM(), tokenizer, config)
+                resumed_history = train_model(
+                    resumed_model,
+                    tokenizer,
+                    [example],
+                    [example],
+                    config,
+                    torch.device("cpu"),
+                )
+                self.assertEqual(resumed_history["status"], "early_stopped")
+                self.assertEqual(len(resumed_history["resume_events"]), 1)
 
 
 if __name__ == "__main__":

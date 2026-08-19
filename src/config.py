@@ -63,6 +63,11 @@ class TrainingConfig:
     seed: int = 42
     log_every: int = 20
     eval_every_epochs: int = 1
+    checkpoint_every_steps: int = 100
+    early_stopping_patience: int | None = 3
+    early_stopping_min_delta: float = 0.0
+    auto_resume: bool = True
+    resume_from_checkpoint: str | None = None
     max_train_examples: int | None = None
     max_validation_examples: int | None = None
     output_dir: str = "outputs/baseline"
@@ -105,6 +110,19 @@ class ExperimentConfig:
             raise ValueError("max_rows and max_cols must be positive")
         if not 0 <= self.cross_attention.gate_init < 1:
             raise ValueError("gate_init must be in [0, 1)")
+        if self.training.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be positive")
+        if self.training.log_every < 1:
+            raise ValueError("log_every must be positive")
+        if self.training.eval_every_epochs < 1:
+            raise ValueError("eval_every_epochs must be positive")
+        if self.training.checkpoint_every_steps < 0:
+            raise ValueError("checkpoint_every_steps cannot be negative")
+        if (
+            self.training.early_stopping_patience is not None
+            and self.training.early_stopping_patience < 0
+        ):
+            raise ValueError("early_stopping_patience cannot be negative")
 
 
 _SECTIONS: dict[str, type[Any]] = {

@@ -20,7 +20,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mirror-output-dir",
         default=None,
-        help="Also copy run artifacts to this directory after every epoch",
+        help="Also copy run artifacts here at checkpoints and epoch boundaries",
+    )
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--resume-from",
+        default=None,
+        help="Resume from a specific full-state checkpoint",
+    )
+    resume_group.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Ignore existing local and mirrored checkpoints",
     )
     return parser.parse_args()
 
@@ -30,6 +41,12 @@ def main() -> None:
     config = load_config(args.config)
     if args.mirror_output_dir:
         config.training.mirror_output_dir = args.mirror_output_dir
+    if args.resume_from:
+        config.training.resume_from_checkpoint = args.resume_from
+        config.training.auto_resume = False
+    elif args.no_resume:
+        config.training.resume_from_checkpoint = None
+        config.training.auto_resume = False
     set_seed(config.training.seed)
     device = select_device()
     dtype = model_dtype(device, config.training.bf16)

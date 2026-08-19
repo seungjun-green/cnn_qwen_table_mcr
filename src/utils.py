@@ -46,12 +46,14 @@ def model_dtype(device: torch.device, use_bf16: bool) -> torch.dtype:
 def write_json(data: Any, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as handle:
         json.dump(data, handle, ensure_ascii=False, indent=2)
+    temporary_path.replace(path)
 
 
 def mirror_directory(source: str | Path, destination: str | Path) -> None:
-    """Copy a run directory to persistent storage without removing existing files."""
+    """Atomically update a persistent mirror without removing existing files."""
     source = Path(source).resolve()
     destination = Path(destination).resolve()
     if source == destination or source in destination.parents:
@@ -59,12 +61,44 @@ def mirror_directory(source: str | Path, destination: str | Path) -> None:
     if not source.is_dir():
         raise FileNotFoundError(f"Mirror source does not exist: {source}")
     destination.mkdir(parents=True, exist_ok=True)
-    for item in source.iterdir():
-        target = destination / item.name
+    for item in source.rglob("*"):
+        if item.is_symlink():
+            raise ValueError(f"Refusing to mirror symbolic link: {item}")
+        target = destination / item.relative_to(source)
         if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, target)
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        if item.name.endswith(".tmp"):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            source_stat = item.stat()
+            target_stat = target.stat()
+            if (
+                source_stat.st_size == target_stat.st_size
+                and target_stat.st_mtime_ns == source_stat.st_mtime_ns
+            ):
+                continue
+        temporary_target = target.with_suffix(target.suffix + ".tmp")
+        shutil.copy2(item, temporary_target)
+        temporary_target.replace(target)
+
+
+def restore_directory_from_mirror(mirror: str | Path, destination: str | Path) -> bool:
+    """Restore a run when Drive has a checkpoint newer than the local copy."""
+    mirror = Path(mirror)
+    destination = Path(destination)
+    mirror_checkpoint = mirror / "checkpoint_last.pt"
+    if not mirror_checkpoint.is_file():
+        return False
+    local_checkpoint = destination / "checkpoint_last.pt"
+    if local_checkpoint.is_file():
+        mirror_mtime = mirror_checkpoint.stat().st_mtime
+        if local_checkpoint.stat().st_mtime > mirror_mtime:
+            return False
+    destination.mkdir(parents=True, exist_ok=True)
+    mirror_directory(mirror, destination)
+    return True
 
 
 def trainable_parameter_count(model: torch.nn.Module) -> int:

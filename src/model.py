@@ -251,20 +251,10 @@ def build_model(
     return model.to(device=device, dtype=dtype)
 
 
-def save_trainable_checkpoint(model: nn.Module, path: str | Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    state = {
-        name: parameter.detach().cpu()
-        for name, parameter in model.named_parameters()
-        if parameter.requires_grad
-    }
-    torch.save(state, path)
-
-
 def load_trainable_checkpoint(model: nn.Module, path: str | Path) -> None:
-    state = torch.load(path, map_location="cpu", weights_only=True)
-    incompatible = model.load_state_dict(state, strict=False)
-    unexpected = list(incompatible.unexpected_keys)
-    if unexpected:
-        raise RuntimeError(f"Unexpected checkpoint keys: {unexpected}")
+    from .checkpointing import load_trainable_state_dict
+
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    if "model_state" in state:
+        state = state["model_state"]
+    load_trainable_state_dict(model, state)

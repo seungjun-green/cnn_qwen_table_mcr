@@ -102,6 +102,7 @@ variants cover:
 
 - pooling: mean, max, attention
 - cell width: 128, 256, 512
+- CNN depth: 2 and 4 (depth 6 is also supported)
 - table grids: 16×8, 32×8, 64×8, 64×16
 - serialized-table input
 
@@ -117,6 +118,20 @@ max_validation_examples: 50
 epochs: 1
 ```
 
+Disconnect-safe training controls are also configurable:
+
+```yaml
+training:
+  checkpoint_every_steps: 100
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0
+  auto_resume: true
+```
+
+Loss is shown in the live training progress bar and every optimizer-step loss is
+stored in `history.json`. Set `early_stopping_patience: null` to disable early
+stopping, or `checkpoint_every_steps: 0` to disable mid-epoch checkpoints.
+
 ## Outputs and reproducibility
 
 Each training run saves:
@@ -125,16 +140,19 @@ Each training run saves:
 outputs/<run>/
 ├── config.yaml
 ├── history.json
+├── checkpoint_best.pt
 ├── checkpoint_last.pt
 └── validation_epoch_<N>/
     ├── metrics.json
     └── predictions.json
 ```
 
-Checkpoints contain trainable parameters only. For the frozen-backbone CNN model,
-this keeps checkpoints compact; evaluation reloads the named Qwen base model before
-applying them. Serialized baseline checkpoints contain the fine-tuned backbone and
-are correspondingly large.
+Both checkpoints are fully resumable. They contain the trainable model parameters,
+optimizer state, epoch and next-batch position, global step, loss history, best
+validation metric, early-stopping counters, resolved config, and Python/NumPy/Torch/
+CUDA random states. The frozen Qwen backbone is reloaded by name rather than copied
+into the CNN checkpoint. Serialized baseline checkpoints contain the fine-tuned
+backbone and are correspondingly large.
 
 To retain a second copy on persistent storage, pass a mirror directory:
 
@@ -144,22 +162,60 @@ python scripts/run_experiment.py \
   --mirror-output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/baseline
 ```
 
-The local run remains under `outputs/baseline`. After every epoch, all run artifacts
-are also copied to the mirror. The resolved `config.yaml` records the mirror path.
+The local run remains under `outputs/baseline`. At every configured checkpoint and
+after every epoch, all run artifacts are copied to the mirror. On a fresh Colab
+runtime, the mirror is automatically restored before model training starts. Resume
+uses the last completed optimizer step; it never restores a partial accumulation.
+The resolved `config.yaml` records the mirror path.
+
+Automatic resume is the default. It can also be controlled explicitly:
+
+```bash
+# Restore a particular checkpoint
+python scripts/train.py --config configs/baseline.yaml \
+  --resume-from /path/to/checkpoint_last.pt
+
+# Deliberately start from scratch
+python scripts/train.py --config configs/baseline.yaml --no-resume
+```
+
+Checkpoint architecture is checked against the active config before loading, which
+prevents accidentally loading one experiment's weights into another architecture.
 
 Seeds are set for Python, NumPy, PyTorch, and CUDA. Evaluation uses greedy generation.
 
 ## Colab
 
-Open `notebooks/colab_runner.ipynb`, set `REPO_URL`, and run the cells. The notebook
-clones the repository, installs dependencies, reads `HF_TOKEN` from Colab userdata,
-and mounts Google Drive. Training outputs are kept both locally and under:
+Open `notebooks/colab_runner.ipynb` and run the cells. The repository URL is already
+configured. The setup cell safely pulls an existing clone or creates it, installs
+dependencies, reads `HF_TOKEN` from Colab userdata, and mounts Google Drive. Training
+outputs are kept both locally and under:
 
 ```text
 /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/baseline
 ```
 
 Model logic stays in the package rather than notebook cells.
+
+The notebook also includes a nine-config ordered sweep. Its persistent state is:
+
+```text
+/content/drive/MyDrive/cnn_qwen_table_mcr/outputs/sweep_state.json
+```
+
+Rerunning the sweep cell skips configs marked `completed`. If the runtime stopped
+during a config, the sweep invokes that config again and training restores its latest
+full checkpoint from the corresponding Drive directory. If training finished but
+the runtime stopped before the sweep state was updated, the completed checkpoint is
+detected and the training command exits without repeating epochs.
+
+The same mechanism can run any ordered config list:
+
+```bash
+python scripts/run_sweep.py \
+  --configs configs/baseline.yaml configs/pooling_max.yaml configs/cell_dim_128.yaml \
+  --mirror-root /content/drive/MyDrive/cnn_qwen_table_mcr/outputs
+```
 
 ## Local tests
 
@@ -170,7 +226,8 @@ python -m unittest discover -s tests -v
 ```
 
 It checks configuration loading, masking and truncation, the decoder injection, loss,
-and gradient flow through every new model component.
+gradient flow, atomic full-checkpoint restoration, output mirroring, early stopping,
+and completed-run auto-resume.
 
 ## Repository layout
 
@@ -182,6 +239,7 @@ src/pooling.py           mean/max/attention token pooling
 src/cell_encoder.py      batched cell encoding and MLP
 src/table_cnn.py         masked 2D CNN and projector
 src/cross_attention.py   gated multi-head cross-attention
+src/checkpointing.py     atomic full-state save and resume
 src/model.py             Qwen wrappers and checkpoint I/O
 src/train.py             training loop and run artifacts
 src/evaluate.py          deterministic Exact Match evaluation
