@@ -31,7 +31,7 @@ training:
   batch_size: 1
   gradient_accumulation_steps: 8
   learning_rate: 1.0e-4
-  epochs: 3
+  epochs: 10
   seed: 42
   checkpoint_every_steps: 100
   early_stopping_patience: 3

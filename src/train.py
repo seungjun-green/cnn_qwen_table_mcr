@@ -53,11 +53,12 @@ def train_model(
     device: torch.device,
 ) -> dict[str, Any]:
     output_dir = Path(config.training.output_dir)
+    run_name = output_dir.name or "experiment"
     mirror_output_dir = config.training.mirror_output_dir
     if config.training.auto_resume and mirror_output_dir:
         restored = restore_directory_from_mirror(mirror_output_dir, output_dir)
         if restored:
-            print(f"Restored run artifacts from {mirror_output_dir}")
+            print(f"[{run_name}] Restored run artifacts from {mirror_output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     save_config(config, output_dir / "config.yaml")
 
@@ -139,14 +140,18 @@ def train_model(
         resumed_epoch_loss = float(checkpoint.get("epoch_loss_sum", 0.0))
         resumed_batches_seen = int(checkpoint.get("epoch_batches_seen", 0))
         print(
-            f"Resuming epoch {start_epoch + 1} at batch {start_batch_index}; "
+            f"[{run_name}] Resuming epoch {start_epoch + 1} at batch "
+            f"{start_batch_index}; "
             f"optimizer step {global_step}"
         )
         stopped_early = checkpoint.get("stop_reason") == "early_stopping"
         already_finished = start_epoch >= config.training.epochs
         if stopped_early or already_finished:
             history["status"] = "early_stopped" if stopped_early else "completed"
-            print(f"Run is already {history['status']}; no training is needed.")
+            print(
+                f"[{run_name}] Run is already {history['status']}; "
+                "no training is needed."
+            )
             write_json(history, output_dir / "history.json")
             if mirror_output_dir:
                 mirror_directory(output_dir, mirror_output_dir)
@@ -183,7 +188,7 @@ def train_model(
             iterator,
             total=len(loader),
             initial=resume_batch,
-            desc=f"Train epoch {epoch + 1}/{config.training.epochs}",
+            desc=f"[{run_name}] Train epoch {epoch + 1}/{config.training.epochs}",
         )
         for batch_index, batch in enumerate(progress, start=resume_batch):
             input_ids = batch["input_ids"].to(device)
@@ -287,7 +292,7 @@ def train_model(
                 config,
                 device,
                 predictions_path=validation_dir / "predictions.json",
-                description=f"Validation epoch {epoch + 1}",
+                description=f"[{run_name}] Validation epoch {epoch + 1}",
             )
             epoch_record["validation"] = metrics
             metric = float(metrics["exact_match"])
@@ -356,8 +361,9 @@ def train_model(
             mirror_directory(output_dir, mirror_output_dir)
         if stop_training:
             print(
-                f"Early stopping after epoch {epoch + 1}: validation Exact Match "
-                f"did not improve for {epochs_without_improvement} evaluation(s)."
+                f"[{run_name}] Early stopping after epoch {epoch + 1}: validation "
+                f"Exact Match did not improve for {epochs_without_improvement} "
+                "evaluation(s)."
             )
             break
         start_batch_index = 0

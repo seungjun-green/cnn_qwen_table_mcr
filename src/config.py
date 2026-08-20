@@ -59,7 +59,7 @@ class TrainingConfig:
     learning_rate: float = 1.0e-4
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
-    epochs: int = 3
+    epochs: int = 10
     seed: int = 42
     log_every: int = 20
     eval_every_epochs: int = 1

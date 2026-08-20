@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -47,6 +52,20 @@ def main() -> None:
     elif args.no_resume:
         config.training.resume_from_checkpoint = None
         config.training.auto_resume = False
+    run_name = Path(config.training.output_dir).name or Path(args.config).stem
+    separator = "=" * 88
+    print(f"\n{separator}", flush=True)
+    print(f"EXPERIMENT: {run_name}", flush=True)
+    print(f"CONFIG:     {Path(args.config).resolve()}", flush=True)
+    print(
+        f"MODEL:      {config.model.name} | TYPE: {config.experiment_type} | "
+        f"EPOCHS: {config.training.epochs}",
+        flush=True,
+    )
+    print(f"OUTPUT:     {config.training.output_dir}", flush=True)
+    if config.training.mirror_output_dir:
+        print(f"DRIVE:      {config.training.mirror_output_dir}", flush=True)
+    print(f"{separator}\n", flush=True)
     set_seed(config.training.seed)
     device = select_device()
     dtype = model_dtype(device, config.training.bf16)
@@ -54,9 +73,15 @@ def main() -> None:
     tokenizer = load_tokenizer(config)
     dataset = load_wtq(config.data.dataset, config.data.revision)
     model = build_model(config, tokenizer, device, dtype)
-    train_model(
+    history = train_model(
         model, tokenizer, dataset["train"], dataset["validation"], config, device
     )
+    best_metric = history.get("best_exact_match")
+    best_text = "n/a" if best_metric is None else f"{best_metric:.4f}"
+    print(f"\n{separator}", flush=True)
+    print(f"EXPERIMENT FINISHED: {run_name}", flush=True)
+    print(f"STATUS: {history.get('status', 'unknown')} | BEST EXACT MATCH: {best_text}")
+    print(f"{separator}\n", flush=True)
 
 
 if __name__ == "__main__":

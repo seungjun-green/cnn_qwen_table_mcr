@@ -118,7 +118,15 @@ def main() -> None:
         state["active_config"] = config_key
         state["updated_at_unix"] = time.time()
         write_json(state, state_path)
-        print(f"[{position}/{len(resolved_configs)}] Running {config_key}")
+        separator = "#" * 88
+        print(f"\n{separator}", flush=True)
+        print(
+            f"SWEEP CONFIG {position}/{len(resolved_configs)}: {mirror_dir.name}",
+            flush=True,
+        )
+        print(f"CONFIG FILE:  {config_path}", flush=True)
+        print(f"DRIVE OUTPUT: {mirror_dir}", flush=True)
+        print(f"{separator}\n", flush=True)
 
         command = [
             sys.executable,
@@ -143,6 +151,13 @@ def main() -> None:
             entry["status"] = "completed"
         else:
             entry["status"] = "failed"
+        print(f"\n{separator}", flush=True)
+        print(
+            f"SWEEP CONFIG {position}/{len(resolved_configs)} FINISHED: "
+            f"{mirror_dir.name} ({entry['status']})",
+            flush=True,
+        )
+        print(f"{separator}\n", flush=True)
         state["active_config"] = None
         state["updated_at_unix"] = time.time()
         write_json(state, state_path)

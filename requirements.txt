@@ -1,5 +1,5 @@
 torch>=2.2
-transformers>=4.51,<5
+transformers>=4.56,<5
 datasets>=2.19,<5
 pyarrow>=15
 PyYAML>=6.0

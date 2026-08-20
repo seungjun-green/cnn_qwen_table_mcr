@@ -13,7 +13,7 @@ training:
   batch_size: 1
   gradient_accumulation_steps: 8
   learning_rate: 2.0e-5
-  epochs: 3
+  epochs: 10
   seed: 42
   output_dir: outputs/serialized_table
 generation:

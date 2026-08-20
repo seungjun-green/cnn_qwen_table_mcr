@@ -240,10 +240,14 @@ def build_model(
 
     language_model = AutoModelForCausalLM.from_pretrained(
         config.model.name,
-        torch_dtype=dtype,
+        dtype=dtype,
         trust_remote_code=config.model.trust_remote_code,
     )
     language_model.config.pad_token_id = tokenizer.pad_token_id
+    language_model.generation_config.do_sample = False
+    language_model.generation_config.temperature = None
+    language_model.generation_config.top_p = None
+    language_model.generation_config.top_k = None
     if config.experiment_type == "cnn":
         model: nn.Module = TableCNNQwen(language_model, tokenizer, config)
     else:

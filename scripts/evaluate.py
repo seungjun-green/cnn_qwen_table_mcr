@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -44,6 +49,7 @@ def main() -> None:
     model = build_model(config, tokenizer, device, dtype)
     load_trainable_checkpoint(model, args.checkpoint)
     output_dir = Path(args.output_dir or config.training.output_dir) / args.split
+    run_name = Path(config.training.output_dir).name or "experiment"
     metrics, _ = evaluate_model(
         model,
         tokenizer,
@@ -51,6 +57,7 @@ def main() -> None:
         config,
         device,
         predictions_path=output_dir / "predictions.json",
+        description=f"[{run_name}] {args.split} evaluation",
     )
     if config.training.mirror_output_dir:
         mirror_directory(
