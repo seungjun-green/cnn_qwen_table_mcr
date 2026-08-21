@@ -105,6 +105,8 @@ def main() -> None:
     assert_gradient("cell encoder", model.cell_encoder)
     assert_gradient("CNN", model.table_cnn)
     assert_gradient("projector", model.projector)
+    if config.lora.enabled:
+        assert_gradient("LoRA adapters", model.language_model)
     if isinstance(model, TableCNNQwen):
         assert_gradient("cross-attention", model.cross_attention)
 

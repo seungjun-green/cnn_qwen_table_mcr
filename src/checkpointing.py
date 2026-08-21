@@ -38,6 +38,8 @@ def architecture_signature(config: ExperimentConfig) -> str:
             )
         },
     }
+    if config.lora.enabled:
+        relevant["lora"] = config_dict["lora"]
     payload = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 

@@ -16,18 +16,23 @@ from .table_cnn import TableCNN, TableProjector
 
 
 def _decoder_layers(language_model: nn.Module) -> nn.ModuleList:
-    candidates = [
-        getattr(getattr(language_model, "model", None), "layers", None),
-        getattr(
-            getattr(getattr(language_model, "model", None), "model", None),
-            "layers",
-            None,
-        ),
-        getattr(getattr(language_model, "transformer", None), "h", None),
-    ]
-    for layers in candidates:
-        if layers is not None:
-            return layers
+    models = [language_model]
+    get_base_model = getattr(language_model, "get_base_model", None)
+    if callable(get_base_model):
+        models.append(get_base_model())
+    for model in models:
+        candidates = [
+            getattr(getattr(model, "model", None), "layers", None),
+            getattr(
+                getattr(getattr(model, "model", None), "model", None),
+                "layers",
+                None,
+            ),
+            getattr(getattr(model, "transformer", None), "h", None),
+        ]
+        for layers in candidates:
+            if layers is not None:
+                return layers
     raise TypeError("Could not locate decoder layers on the loaded language model")
 
 
@@ -68,7 +73,8 @@ class TableCNNQwen(nn.Module):
             dropout=config.cross_attention.dropout,
         )
         self.backbone_frozen = config.model.freeze_backbone
-        if self.backbone_frozen:
+        self.lora_enabled = config.lora.enabled
+        if self.backbone_frozen and not self.lora_enabled:
             self.language_model.requires_grad_(False)
 
         layers = _decoder_layers(language_model)
@@ -85,7 +91,7 @@ class TableCNNQwen(nn.Module):
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.backbone_frozen:
+        if self.backbone_frozen and not self.lora_enabled:
             self.language_model.eval()
         return self
 
@@ -205,12 +211,13 @@ class ContinuousPrefixQwen(nn.Module):
         )
         self.projector = TableProjector(config.cnn.channels, hidden_size)
         self.backbone_frozen = config.model.freeze_backbone
-        if self.backbone_frozen:
+        self.lora_enabled = config.lora.enabled
+        if self.backbone_frozen and not self.lora_enabled:
             self.language_model.requires_grad_(False)
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.backbone_frozen:
+        if self.backbone_frozen and not self.lora_enabled:
             self.language_model.eval()
         return self
 
@@ -313,16 +320,19 @@ class ContinuousPrefixQwen(nn.Module):
 
 
 class SerializedTableQwen(nn.Module):
-    def __init__(self, language_model: nn.Module, freeze_backbone: bool) -> None:
+    def __init__(
+        self, language_model: nn.Module, freeze_backbone: bool, lora_enabled: bool
+    ) -> None:
         super().__init__()
         self.language_model = language_model
         self.backbone_frozen = freeze_backbone
-        if freeze_backbone:
+        self.lora_enabled = lora_enabled
+        if freeze_backbone and not lora_enabled:
             self.language_model.requires_grad_(False)
 
     def train(self, mode: bool = True):
         super().train(mode)
-        if self.backbone_frozen:
+        if self.backbone_frozen and not self.lora_enabled:
             self.language_model.eval()
         return self
 
@@ -388,12 +398,30 @@ def build_model(
     language_model.generation_config.temperature = None
     language_model.generation_config.top_p = None
     language_model.generation_config.top_k = None
+    if config.lora.enabled:
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        language_model = get_peft_model(
+            language_model,
+            LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=config.lora.rank,
+                lora_alpha=config.lora.alpha,
+                lora_dropout=config.lora.dropout,
+                target_modules=config.lora.target_modules,
+                bias=config.lora.bias,
+            ),
+        )
     if config.experiment_type == "cnn":
         model: nn.Module = TableCNNQwen(language_model, tokenizer, config)
     elif config.experiment_type == "continuous_prefix":
         model = ContinuousPrefixQwen(language_model, tokenizer, config)
     else:
-        model = SerializedTableQwen(language_model, config.model.freeze_backbone)
+        model = SerializedTableQwen(
+            language_model,
+            config.model.freeze_backbone,
+            config.lora.enabled,
+        )
     return model.to(device=device, dtype=dtype)
 
 

@@ -1,20 +1,25 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-from src.checkpointing import load_training_checkpoint, save_training_checkpoint
+from src.checkpointing import (
+    architecture_signature,
+    load_training_checkpoint,
+    save_training_checkpoint,
+)
 from src.config import ExperimentConfig, load_config
 from src.data import MRCBatchCollator, Table, build_prompt_ids, truncate_table
 from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
-from src.model import ContinuousPrefixQwen, TableCNNQwen
+from src.model import ContinuousPrefixQwen, TableCNNQwen, build_model
 from src.pooling import TokenPooler
 from src.train import train_model
 from src.utils import mirror_directory
@@ -68,6 +73,7 @@ class DummyLM(nn.Module):
     def __init__(self, hidden_size=16, vocab_size=32, layers=3):
         super().__init__()
         self.config = SimpleNamespace(hidden_size=hidden_size, pad_token_id=0)
+        self.generation_config = SimpleNamespace()
         self.embed = nn.Embedding(vocab_size, hidden_size)
         self.model = SimpleNamespace()
         self.model.layers = nn.ModuleList(
@@ -97,6 +103,8 @@ class DummyLM(nn.Module):
         hidden = self.embed(input_ids) if inputs_embeds is None else inputs_embeds
         for layer in self.layers:
             hidden = layer(hidden)
+        if hasattr(self, "lora_adapter"):
+            hidden = hidden + self.lora_adapter(hidden)
         logits = self.head(hidden)
         loss = None
         if labels is not None:
@@ -136,6 +144,90 @@ class DummyLM(nn.Module):
 
 
 class ComponentTests(unittest.TestCase):
+    def test_lora_build_keeps_only_adapters_and_table_path_trainable(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig(experiment_type="continuous_prefix")
+        config.lora.enabled = True
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.cell_encoder.cell_dim = 128
+        config.cnn.channels = 128
+        observed: dict[str, object] = {}
+
+        class FakeAutoModel:
+            @staticmethod
+            def from_pretrained(*args, **kwargs):
+                observed["model_load"] = (args, kwargs)
+                return DummyLM()
+
+        class FakePeftConfig:
+            def __init__(self, **kwargs):
+                observed["lora_config"] = kwargs
+
+        class FakeTaskType:
+            CAUSAL_LM = "CAUSAL_LM"
+
+        def fake_get_peft_model(language_model, lora_config):
+            del lora_config
+            language_model.requires_grad_(False)
+            language_model.lora_adapter = nn.Linear(16, 16, bias=False)
+            return language_model
+
+        fake_transformers = ModuleType("transformers")
+        fake_transformers.AutoModelForCausalLM = FakeAutoModel
+        fake_peft = ModuleType("peft")
+        fake_peft.LoraConfig = FakePeftConfig
+        fake_peft.TaskType = FakeTaskType
+        fake_peft.get_peft_model = fake_get_peft_model
+        with patch.dict(
+            sys.modules,
+            {"transformers": fake_transformers, "peft": fake_peft},
+        ):
+            model = build_model(
+                config,
+                tokenizer,
+                torch.device("cpu"),
+                torch.float32,
+            )
+
+        self.assertIsInstance(model, ContinuousPrefixQwen)
+        self.assertFalse(model.language_model.embed.weight.requires_grad)
+        self.assertTrue(model.language_model.lora_adapter.weight.requires_grad)
+        self.assertEqual(
+            observed["lora_config"]["target_modules"],
+            ["q_proj", "k_proj", "v_proj", "o_proj"],
+        )
+        self.assertEqual(observed["lora_config"]["r"], 16)
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer, "continuous_prefix", 4, 3, 32, 8, training=True
+        )([example])
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            tables=batch["tables"],
+        )
+        output.loss.backward()
+        adapter_gradient = model.language_model.lora_adapter.weight.grad
+        self.assertIsNotNone(adapter_gradient)
+        self.assertGreater(torch.count_nonzero(adapter_gradient).item(), 0)
+
+    def test_disabled_lora_preserves_legacy_checkpoint_signature(self):
+        baseline = load_config("configs/baseline.yaml")
+        self.assertEqual(
+            architecture_signature(baseline),
+            "0c07a3ebeb08140b649107a3914e747090ebc6060be3b8eacefdcb6cbd1b475c",
+        )
+        lora_config = load_config("configs/continuous_prefix_lora.yaml")
+        self.assertNotEqual(
+            architecture_signature(lora_config), architecture_signature(baseline)
+        )
+
     def test_prompt_can_explicitly_disable_qwen_thinking(self):
         class ChatTokenizer(DummyTokenizer):
             chat_template = "template"

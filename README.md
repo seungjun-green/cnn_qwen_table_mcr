@@ -31,6 +31,18 @@ Loss is masked for every table and question position, so only answer tokens are
 training targets. A separate serialized-table baseline remains available in
 `configs/serialized_table.yaml`.
 
+The recommended training config adds LoRA adapters to Qwen's self-attention while
+keeping its pretrained weights frozen. The table encoder, projector, and adapters
+are optimized jointly:
+
+```text
+[table-prefix embeddings][question tokens][answer tokens]
+                         ↓
+       Qwen + LoRA(q_proj, k_proj, v_proj, o_proj)
+                         ↓
+                       answer
+```
+
 ## Quick start
 
 Python 3.10+ and an NVIDIA GPU are recommended. The baseline targets an H100 and
@@ -59,6 +71,13 @@ Train the continuous-prefix model:
 ```bash
 python scripts/smoke_test.py --config configs/continuous_prefix.yaml
 python scripts/run_experiment.py --config configs/continuous_prefix.yaml
+```
+
+Train the recommended LoRA version:
+
+```bash
+python scripts/smoke_test.py --config configs/continuous_prefix_lora.yaml
+python scripts/run_experiment.py --config configs/continuous_prefix_lora.yaml
 ```
 
 Evaluate a saved checkpoint on validation:
@@ -110,6 +129,12 @@ only decoder; the cell MLP, CNN, and table projector learn a soft table prefix t
 conditions it. Qwen thinking is disabled consistently for this experiment during
 both training and evaluation, which keeps the short-answer prompt format aligned.
 
+`configs/continuous_prefix_lora.yaml` additionally trains PEFT LoRA adapters on all
+Qwen attention projections with rank 16, alpha 32, and dropout 0.05. The original
+Qwen parameters remain frozen. LoRA is configured through the top-level `lora`
+section; set `enabled: false` for the frozen-decoder ablation. The integration uses
+Hugging Face's [PEFT LoRA API](https://huggingface.co/docs/peft/package_reference/lora).
+
 ## Data behavior
 
 The dataset is loaded exactly as:
@@ -132,7 +157,8 @@ repeated whitespace.
 
 ## Configuration
 
-`configs/continuous_prefix.yaml` is the recommended single-decoder experiment, and
+`configs/continuous_prefix_lora.yaml` is the recommended single-decoder experiment,
+`configs/continuous_prefix.yaml` is its frozen-Qwen ablation, and
 `configs/baseline.yaml` is the original cross-attention CNN experiment. Included
 one-variable variants cover:
 
@@ -204,13 +230,13 @@ runtime, the mirror is automatically restored before model training starts. Resu
 uses the last completed optimizer step; it never restores a partial accumulation.
 The resolved `config.yaml` records the mirror path.
 
-For the new model in Colab, use a distinct Drive directory so it cannot resume an
-incompatible cross-attention checkpoint:
+For the LoRA model in Colab, use its distinct Drive directory so it cannot resume an
+incompatible frozen-prefix or cross-attention checkpoint:
 
 ```bash
 python scripts/run_experiment.py \
-  --config configs/continuous_prefix.yaml \
-  --mirror-output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/continuous_prefix
+  --config configs/continuous_prefix_lora.yaml \
+  --mirror-output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/continuous_prefix_lora
 ```
 
 Automatic resume is the default. It can also be controlled explicitly:
@@ -242,10 +268,11 @@ outputs are kept both locally and under:
 
 Model logic stays in the package rather than notebook cells.
 
-For the new single-decoder experiment, open
-`notebooks/continuous_prefix_colab.ipynb`. It has a smaller workflow dedicated to
-the continuous-prefix config: setup, smoke test, disconnect-safe training, history
-inspection, and a correct-table versus shuffled-table diagnostic.
+Both Colab notebooks now run the recommended continuous-prefix LoRA config. For the
+focused workflow, open `notebooks/continuous_prefix_colab.ipynb`; it includes setup,
+the LoRA smoke test, disconnect-safe training, history inspection, and a
+correct-table versus shuffled-table diagnostic. Commands use unbuffered Python so
+training progress appears live in Colab.
 
 The notebook also includes a nine-config ordered sweep. Its persistent state is:
 

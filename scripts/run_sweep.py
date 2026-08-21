@@ -50,7 +50,10 @@ def _load_state(path: Path) -> dict[str, Any]:
 
 
 def _config_fingerprint(config: Any) -> str:
-    payload = json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":"))
+    config_dict = config.to_dict()
+    if not config_dict["lora"]["enabled"]:
+        config_dict.pop("lora")
+    payload = json.dumps(config_dict, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

@@ -306,6 +306,18 @@ def train_model(
                 epochs_without_improvement += 1
             epoch_record["best_exact_match"] = best_metric
             epoch_record["epochs_without_improvement"] = epochs_without_improvement
+            improvement_text = "improved" if improved else "no improvement"
+            patience_text = (
+                "disabled"
+                if patience is None
+                else f"{epochs_without_improvement}/{patience}"
+            )
+            print(
+                f"[{run_name}] Epoch {epoch + 1} validation Exact Match: "
+                f"{metric:.4f} | best: {best_metric:.4f} | {improvement_text} | "
+                f"patience: {patience_text}",
+                flush=True,
+            )
             stop_training = (
                 not improved
                 and patience is not None

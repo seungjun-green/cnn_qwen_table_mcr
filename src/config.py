@@ -51,6 +51,18 @@ class CrossAttentionConfig:
 
 
 @dataclass
+class LoRAConfig:
+    enabled: bool = False
+    rank: int = 16
+    alpha: int = 32
+    dropout: float = 0.05
+    target_modules: list[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
+    bias: str = "none"
+
+
+@dataclass
 class TrainingConfig:
     bf16: bool = True
     batch_size: int = 1
@@ -87,6 +99,7 @@ class ExperimentConfig:
     cell_encoder: CellEncoderConfig = field(default_factory=CellEncoderConfig)
     cnn: CNNConfig = field(default_factory=CNNConfig)
     cross_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
+    lora: LoRAConfig = field(default_factory=LoRAConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
@@ -112,6 +125,20 @@ class ExperimentConfig:
             raise ValueError("max_rows and max_cols must be positive")
         if not 0 <= self.cross_attention.gate_init < 1:
             raise ValueError("gate_init must be in [0, 1)")
+        if self.lora.rank < 1:
+            raise ValueError("lora.rank must be positive")
+        if self.lora.alpha < 1:
+            raise ValueError("lora.alpha must be positive")
+        if not 0 <= self.lora.dropout < 1:
+            raise ValueError("lora.dropout must be in [0, 1)")
+        if not self.lora.target_modules or not all(
+            isinstance(module, str) and module for module in self.lora.target_modules
+        ):
+            raise ValueError("lora.target_modules must contain module names")
+        if self.lora.bias not in {"none", "all", "lora_only"}:
+            raise ValueError("lora.bias must be none, all, or lora_only")
+        if self.lora.enabled and not self.model.freeze_backbone:
+            raise ValueError("LoRA requires model.freeze_backbone: true")
         if self.training.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be positive")
         if self.training.log_every < 1:
@@ -133,6 +160,7 @@ _SECTIONS: dict[str, type[Any]] = {
     "cell_encoder": CellEncoderConfig,
     "cnn": CNNConfig,
     "cross_attention": CrossAttentionConfig,
+    "lora": LoRAConfig,
     "training": TrainingConfig,
     "generation": GenerationConfig,
 }

@@ -1,0 +1,50 @@
+experiment_type: continuous_prefix
+
+model:
+  name: Qwen/Qwen3-1.7B
+  freeze_backbone: true
+
+data:
+  dataset: stanfordnlp/wikitablequestions
+  revision: refs/pr/4
+  max_rows: 32
+  max_cols: 8
+
+cell_encoder:
+  pooling: mean
+  cell_dim: 128
+  mlp_type: single
+
+cnn:
+  channels: 128
+  depth: 2
+  kernel_size: 3
+  residual: true
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  bias: none
+
+training:
+  bf16: true
+  batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
+  epochs: 10
+  seed: 42
+  checkpoint_every_steps: 100
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0
+  auto_resume: true
+  output_dir: outputs/continuous_prefix_lora
+
+generation:
+  max_new_tokens: 32

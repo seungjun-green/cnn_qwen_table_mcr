@@ -62,6 +62,13 @@ def main() -> None:
         f"EPOCHS: {config.training.epochs}",
         flush=True,
     )
+    if config.lora.enabled:
+        print(
+            f"LORA:       rank={config.lora.rank} | alpha={config.lora.alpha} | "
+            f"dropout={config.lora.dropout} | "
+            f"targets={','.join(config.lora.target_modules)}",
+            flush=True,
+        )
     print(f"OUTPUT:     {config.training.output_dir}", flush=True)
     if config.training.mirror_output_dir:
         print(f"DRIVE:      {config.training.mirror_output_dir}", flush=True)

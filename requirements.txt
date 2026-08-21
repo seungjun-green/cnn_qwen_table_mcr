@@ -7,3 +7,4 @@ numpy>=1.26
 tqdm>=4.66
 safetensors>=0.4
 accelerate>=0.30
+peft>=0.17,<0.19
