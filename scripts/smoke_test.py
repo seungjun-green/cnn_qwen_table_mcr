@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.config import load_config
 from src.data import MRCBatchCollator, load_wtq, normalize_table
-from src.model import TableCNNQwen, build_model, load_tokenizer
+from src.model import ContinuousPrefixQwen, TableCNNQwen, build_model, load_tokenizer
 from src.utils import gradient_norm, model_dtype, select_device, set_seed
 
 
@@ -44,8 +44,11 @@ def assert_gradient(name: str, module: torch.nn.Module) -> float:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    if config.experiment_type != "cnn":
-        raise ValueError("The smoke test requires experiment_type: cnn")
+    supported_types = {"cnn", "continuous_prefix"}
+    if config.experiment_type not in supported_types:
+        raise ValueError(
+            "The smoke test requires experiment_type: cnn or continuous_prefix"
+        )
     set_seed(config.training.seed)
     device = select_device()
     dtype = model_dtype(device, config.training.bf16)
@@ -61,11 +64,11 @@ def main() -> None:
     print(f"Original table shape (including header): {table.shape}")
 
     model = build_model(config, tokenizer, device, dtype)
-    if not isinstance(model, TableCNNQwen):
-        raise TypeError("Expected TableCNNQwen")
+    if not isinstance(model, (TableCNNQwen, ContinuousPrefixQwen)):
+        raise TypeError("Expected a CNN table model")
     collator = MRCBatchCollator(
         tokenizer,
-        experiment_type="cnn",
+        experiment_type=config.experiment_type,
         max_rows=config.data.max_rows,
         max_cols=config.data.max_cols,
         max_question_tokens=config.data.max_question_tokens,
@@ -82,6 +85,8 @@ def main() -> None:
     print(f"After 2D CNN: {shapes['cnn_output']}")
     print(f"Flattened CNN memory: {shapes['flattened_cnn']}")
     print(f"Projected table memory: {shapes['table_memory']}")
+    if "table_prefix" in shapes:
+        print(f"Compacted table prefix: {shapes['table_prefix']}")
     print(f"Valid table cells: {int(memory_mask.sum())}")
     del memory
 
@@ -100,12 +105,13 @@ def main() -> None:
     assert_gradient("cell encoder", model.cell_encoder)
     assert_gradient("CNN", model.table_cnn)
     assert_gradient("projector", model.projector)
-    assert_gradient("cross-attention", model.cross_attention)
+    if isinstance(model, TableCNNQwen):
+        assert_gradient("cross-attention", model.cross_attention)
 
     model.eval()
     eval_collator = MRCBatchCollator(
         tokenizer,
-        experiment_type="cnn",
+        experiment_type=config.experiment_type,
         max_rows=config.data.max_rows,
         max_cols=config.data.max_cols,
         max_question_tokens=config.data.max_question_tokens,

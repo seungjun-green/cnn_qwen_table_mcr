@@ -13,6 +13,10 @@ SYSTEM_PROMPT = (
 SERIALIZED_SYSTEM_PROMPT = (
     "Answer the user's question using the provided table. Return only the final answer."
 )
+CONTINUOUS_PREFIX_SYSTEM_PROMPT = (
+    "A learned representation of the table precedes this conversation. "
+    "Answer the user's question using that table. Return only the final answer."
+)
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,13 @@ def build_prompt_ids(
             SERIALIZED_SYSTEM_PROMPT,
             enable_thinking=enable_thinking,
         )
+    if experiment_type == "continuous_prefix":
+        return _prompt_ids(
+            tokenizer,
+            question,
+            CONTINUOUS_PREFIX_SYSTEM_PROMPT,
+            enable_thinking=enable_thinking,
+        )
     return _prompt_ids(
         tokenizer,
         question,
@@ -143,7 +154,11 @@ class MRCBatchCollator:
         self.max_question_tokens = max_question_tokens
         self.max_answer_tokens = max_answer_tokens
         self.training = training
-        self.enable_thinking = enable_thinking
+        self.enable_thinking = (
+            False
+            if experiment_type == "continuous_prefix" and enable_thinking is None
+            else enable_thinking
+        )
 
     def __call__(self, examples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         sequences: list[list[int]] = []

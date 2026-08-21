@@ -3,7 +3,8 @@
 A config-driven research implementation for testing whether a 2D CNN over semantic
 table-cell embeddings can improve table question answering on WikiTableQuestions.
 
-The proposed model keeps the two modalities separate:
+The repository now supports two Table-CNN fusion strategies. The original model
+keeps the two modalities separate:
 
 ```text
 question ───────────────────────────────→ Qwen3-1.7B decoder
@@ -14,8 +15,21 @@ table → Qwen embeddings → cell pooling → MLP → 2D CNN → projector
 ```
 
 The decoder prompt contains the question only. The table becomes cross-attention
-memory after decoder layer 13 by default. A separate serialized-table baseline is
-included in `configs/serialized_table.yaml`.
+memory after decoder layer 13 by default.
+
+The recommended continuous-prefix experiment instead uses one ordinary causal
+decoder and no cross-attention module:
+
+```text
+table → Qwen embeddings → cell pooling → MLP → 2D CNN → projector ─┐
+                                                                  ├→ Qwen → answer
+question → Qwen token embeddings ─────────────────────────────────┘
+```
+
+Its causal input is `[table-prefix embeddings][question tokens][answer tokens]`.
+Loss is masked for every table and question position, so only answer tokens are
+training targets. A separate serialized-table baseline remains available in
+`configs/serialized_table.yaml`.
 
 ## Quick start
 
@@ -38,6 +52,13 @@ Train the baseline:
 
 ```bash
 python scripts/run_experiment.py --config configs/baseline.yaml
+```
+
+Train the continuous-prefix model:
+
+```bash
+python scripts/smoke_test.py --config configs/continuous_prefix.yaml
+python scripts/run_experiment.py --config configs/continuous_prefix.yaml
 ```
 
 Evaluate a saved checkpoint on validation:
@@ -75,6 +96,20 @@ The Qwen backbone is frozen for the CNN baseline. The shared token embedding mat
 is consequently frozen too, while the cell MLP, CNN, projector, cross-attention, and
 gate are trained.
 
+### Continuous-prefix fusion
+
+`configs/continuous_prefix.yaml` uses the same batched cell encoder and masked 2D
+CNN, with the 128-dimensional cell representation that showed the strongest table
+dependence in the initial sweep. Real cells are packed in row-major order and
+projected to Qwen's hidden size. These continuous vectors are prepended to the
+question's normal token embeddings and sent through Qwen with a standard causal
+attention mask.
+
+There is no decoder hook and no cross-attention block. The frozen Qwen model is the
+only decoder; the cell MLP, CNN, and table projector learn a soft table prefix that
+conditions it. Qwen thinking is disabled consistently for this experiment during
+both training and evaluation, which keeps the short-answer prompt format aligned.
+
 ## Data behavior
 
 The dataset is loaded exactly as:
@@ -97,8 +132,9 @@ repeated whitespace.
 
 ## Configuration
 
-`configs/baseline.yaml` is the canonical CNN experiment. Included one-variable
-variants cover:
+`configs/continuous_prefix.yaml` is the recommended single-decoder experiment, and
+`configs/baseline.yaml` is the original cross-attention CNN experiment. Included
+one-variable variants cover:
 
 - pooling: mean, max, attention
 - cell width: 128, 256, 512
@@ -168,6 +204,15 @@ runtime, the mirror is automatically restored before model training starts. Resu
 uses the last completed optimizer step; it never restores a partial accumulation.
 The resolved `config.yaml` records the mirror path.
 
+For the new model in Colab, use a distinct Drive directory so it cannot resume an
+incompatible cross-attention checkpoint:
+
+```bash
+python scripts/run_experiment.py \
+  --config configs/continuous_prefix.yaml \
+  --mirror-output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/continuous_prefix
+```
+
 Automatic resume is the default. It can also be controlled explicitly:
 
 ```bash
@@ -196,6 +241,11 @@ outputs are kept both locally and under:
 ```
 
 Model logic stays in the package rather than notebook cells.
+
+For the new single-decoder experiment, open
+`notebooks/continuous_prefix_colab.ipynb`. It has a smaller workflow dedicated to
+the continuous-prefix config: setup, smoke test, disconnect-safe training, history
+inspection, and a correct-table versus shuffled-table diagnostic.
 
 The notebook also includes a nine-config ordered sweep. Its persistent state is:
 
@@ -260,9 +310,10 @@ The component suite requires no model or dataset download:
 python -m unittest discover -s tests -v
 ```
 
-It checks configuration loading, masking and truncation, the decoder injection, loss,
-gradient flow, atomic full-checkpoint restoration, output mirroring, early stopping,
-and completed-run auto-resume.
+It checks configuration loading, masking and truncation, decoder injection,
+continuous-prefix construction, answer-only loss masking, loss and gradient flow,
+atomic full-checkpoint restoration, output mirroring, early stopping, and
+completed-run auto-resume.
 
 ## Repository layout
 
@@ -275,7 +326,7 @@ src/cell_encoder.py      batched cell encoding and MLP
 src/table_cnn.py         masked 2D CNN and projector
 src/cross_attention.py   gated multi-head cross-attention
 src/checkpointing.py     atomic full-state save and resume
-src/model.py             Qwen wrappers and checkpoint I/O
+src/model.py             cross-attention, continuous-prefix, and serialized wrappers
 src/train.py             training loop and run artifacts
 src/evaluate.py          deterministic Exact Match evaluation
 scripts/                 command-line entry points

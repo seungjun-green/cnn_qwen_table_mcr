@@ -94,8 +94,10 @@ class ExperimentConfig:
         return asdict(self)
 
     def validate(self) -> None:
-        if self.experiment_type not in {"cnn", "serialized"}:
-            raise ValueError("experiment_type must be 'cnn' or 'serialized'")
+        supported_experiments = {"cnn", "continuous_prefix", "serialized"}
+        if self.experiment_type not in supported_experiments:
+            choices = ", ".join(sorted(supported_experiments))
+            raise ValueError(f"experiment_type must be one of: {choices}")
         if self.cell_encoder.pooling not in {"mean", "max", "attention"}:
             raise ValueError("cell_encoder.pooling must be mean, max, or attention")
         if self.cell_encoder.mlp_type not in {"single", "deep"}:

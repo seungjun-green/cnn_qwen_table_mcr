@@ -14,7 +14,7 @@ from src.checkpointing import load_training_checkpoint, save_training_checkpoint
 from src.config import ExperimentConfig, load_config
 from src.data import MRCBatchCollator, Table, build_prompt_ids, truncate_table
 from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
-from src.model import TableCNNQwen
+from src.model import ContinuousPrefixQwen, TableCNNQwen
 from src.pooling import TokenPooler
 from src.train import train_model
 from src.utils import mirror_directory
@@ -57,7 +57,11 @@ class DummyLayer(nn.Module):
         self.linear = nn.Linear(hidden_size, hidden_size)
 
     def forward(self, hidden):
-        return hidden + torch.tanh(self.linear(hidden))
+        positions = torch.arange(
+            1, hidden.shape[1] + 1, device=hidden.device, dtype=hidden.dtype
+        ).view(1, -1, 1)
+        causal_context = hidden.cumsum(dim=1) / positions
+        return hidden + torch.tanh(self.linear(causal_context))
 
 
 class DummyLM(nn.Module):
@@ -71,13 +75,26 @@ class DummyLM(nn.Module):
         )
         self.layers = self.model.layers
         self.head = nn.Linear(hidden_size, vocab_size)
+        self.last_attention_mask = None
+        self.last_labels = None
+        self.last_inputs_embeds = None
 
     def get_input_embeddings(self):
         return self.embed
 
-    def forward(self, input_ids, attention_mask, labels=None, **kwargs):
-        del attention_mask, kwargs
-        hidden = self.embed(input_ids)
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        labels=None,
+        **kwargs,
+    ):
+        del kwargs
+        self.last_attention_mask = attention_mask.detach().clone()
+        self.last_labels = None if labels is None else labels.detach().clone()
+        self.last_inputs_embeds = inputs_embeds
+        hidden = self.embed(input_ids) if inputs_embeds is None else inputs_embeds
         for layer in self.layers:
             hidden = layer(hidden)
         logits = self.head(hidden)
@@ -90,8 +107,24 @@ class DummyLM(nn.Module):
             )
         return SimpleNamespace(loss=loss, logits=logits)
 
-    def generate(self, input_ids, attention_mask, max_new_tokens, **kwargs):
+    def generate(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        max_new_tokens=1,
+        **kwargs,
+    ):
         del kwargs
+        if inputs_embeds is not None:
+            self.last_inputs_embeds = inputs_embeds
+            self.last_attention_mask = attention_mask.detach().clone()
+            return torch.full(
+                (inputs_embeds.shape[0], max_new_tokens),
+                2,
+                dtype=torch.long,
+                device=inputs_embeds.device,
+            )
         sequence = input_ids
         mask = attention_mask
         for _ in range(max_new_tokens):
@@ -116,6 +149,15 @@ class ComponentTests(unittest.TestCase):
         tokenizer = ChatTokenizer()
         prompt = build_prompt_ids(tokenizer, "question", enable_thinking=False)
         self.assertEqual(prompt, [7, 8])
+        self.assertFalse(tokenizer.observed_enable_thinking)
+        example = {
+            "question": "question",
+            "answers": ["answer"],
+            "table": {"header": ["column"], "rows": [["value"]]},
+        }
+        MRCBatchCollator(tokenizer, "continuous_prefix", 4, 3, 32, 8, training=False)(
+            [example]
+        )
         self.assertFalse(tokenizer.observed_enable_thinking)
 
     def test_table_shuffling_and_dependence_metrics(self):
@@ -271,6 +313,70 @@ class ComponentTests(unittest.TestCase):
             ]
             self.assertTrue(grads)
             self.assertTrue(any(torch.count_nonzero(grad).item() for grad in grads))
+        generated = model.generate(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            tables=batch["tables"],
+            max_new_tokens=2,
+        )
+        self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
+
+    def test_continuous_prefix_masks_loss_and_generates_with_one_decoder(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig(experiment_type="continuous_prefix")
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_cell_tokens = 4
+        config.cell_encoder.cell_dim = 128
+        config.cnn.channels = 128
+        language_model = DummyLM()
+        model = ContinuousPrefixQwen(language_model, tokenizer, config)
+        self.assertFalse(hasattr(model, "cross_attention"))
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer, "continuous_prefix", 4, 3, 32, 8, training=True
+        )([example])
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            tables=batch["tables"],
+        )
+        prefix_length = 4
+        self.assertEqual(
+            language_model.last_inputs_embeds.shape[1],
+            prefix_length + batch["input_ids"].shape[1],
+        )
+        self.assertTrue(
+            torch.equal(
+                language_model.last_labels[:, :prefix_length],
+                torch.full((1, prefix_length), -100),
+            )
+        )
+        self.assertTrue(
+            torch.equal(language_model.last_labels[:, prefix_length:], batch["labels"])
+        )
+        self.assertTrue(
+            torch.equal(
+                language_model.last_attention_mask[:, :prefix_length],
+                torch.ones(1, prefix_length, dtype=torch.long),
+            )
+        )
+        output.loss.backward()
+        for module in [model.cell_encoder, model.table_cnn, model.projector]:
+            gradients = [
+                parameter.grad
+                for parameter in module.parameters()
+                if parameter.requires_grad and parameter.grad is not None
+            ]
+            self.assertTrue(gradients)
+            self.assertTrue(
+                any(torch.count_nonzero(gradient).item() for gradient in gradients)
+            )
         generated = model.generate(
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
