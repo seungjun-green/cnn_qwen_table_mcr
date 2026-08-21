@@ -60,6 +60,20 @@ table ─────→ lexical table tokens                          │
 `configs/structured_2d_lora.yaml` is the proposed model. All three train on every
 gold denotation item and choose checkpoints using official WTQ denotation accuracy.
 
+The cell-aligned CNN residual experiment keeps the exact serialized baseline prompt
+and adds a parallel structural path:
+
+```text
+question + serialized table → Qwen decoder layers ───────────────→ answer
+                              middle hidden state + CNN residual ↑
+table → cell pooling → row/column/type embeddings → 2D CNN ──────┘
+```
+
+Each CNN cell vector is projected to Qwen's hidden size and added only to the
+serialized tokens belonging to that cell. A zero-initialized learned gate controls
+the residual, and the frozen Qwen backbone, LoRA adapters, and CNN path retain the
+same training objective as the serialized baseline.
+
 ## Quick start
 
 Python 3.10+ and an NVIDIA GPU are recommended. The baseline targets an H100 and
@@ -105,6 +119,13 @@ python scripts/run_experiment.py --config configs/serialized_table_lora.yaml
 
 python scripts/smoke_test.py --config configs/structured_2d_lora.yaml
 python scripts/run_experiment.py --config configs/structured_2d_lora.yaml
+```
+
+Run the first serialized-versus-CNN-residual comparison:
+
+```bash
+python scripts/smoke_test.py --config configs/cnn_residual_mean_middle.yaml
+python scripts/run_experiment.py --config configs/cnn_residual_mean_middle.yaml
 ```
 
 Evaluate a saved checkpoint on validation:
@@ -276,6 +297,18 @@ runtime, the mirror is automatically restored before model training starts. Resu
 uses the last completed optimizer step; it never restores a partial accumulation.
 The resolved `config.yaml` records the mirror path.
 
+To use Google Drive as the primary checkpoint location rather than as a mirror, use
+the output override:
+
+```bash
+python scripts/run_experiment.py \
+  --config configs/cnn_residual_mean_middle.yaml \
+  --output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/cnn_residual_mean_middle
+```
+
+In this mode, checkpoints and validation artifacts are written directly to Drive and
+automatic resume reads `checkpoint_last.pt` from the same directory.
+
 For the LoRA model in Colab, use its distinct Drive directory so it cannot resume an
 incompatible frozen-prefix or cross-attention checkpoint:
 
@@ -302,6 +335,11 @@ prevents accidentally loading one experiment's weights into another architecture
 Seeds are set for Python, NumPy, PyTorch, and CUDA. Evaluation uses greedy generation.
 
 ## Colab
+
+For the CNN residual study, open `notebooks/cnn_residual_colab.ipynb`. Enter one
+configuration name per line, or enter `all`. The notebook defaults to the serialized
+LoRA baseline and the mean-pooling middle-layer residual, streams training output,
+and writes every run directly under Google Drive rather than `/content`.
 
 Open `notebooks/colab_runner.ipynb` and run the cells. The repository URL is already
 configured. The setup cell safely pulls an existing clone or creates it, installs

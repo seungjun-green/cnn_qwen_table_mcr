@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from src.data import (
     MRCBatchCollator,
     Table,
     build_prompt_ids,
+    build_serialized_prompt_with_cell_alignment,
     select_table_for_question,
     serialize_answers,
     truncate_table,
@@ -28,6 +30,7 @@ from src.data import (
 from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
 from src.model import (
     ContinuousPrefixQwen,
+    SerializedCNNResidualQwen,
     Structured2DQwen,
     TableCNNQwen,
     build_model,
@@ -38,8 +41,8 @@ from src.utils import mirror_directory
 from src.wtq_evaluation import (
     OfficialTarget,
     check_denotation,
-    normalize_wtq_string,
     load_official_targets,
+    normalize_wtq_string,
     score_prediction,
     split_prediction_items,
     to_wtq_values,
@@ -63,10 +66,24 @@ class DummyTokenizer:
         add_special_tokens=False,
         padding=True,
         truncation=True,
-        max_length=32,
+        max_length=4096,
         return_tensors="pt",
+        return_offsets_mapping=False,
     ):
         del add_special_tokens, padding, truncation, return_tensors
+        if isinstance(texts, str):
+            matches = list(re.finditer(r"\S+", texts))
+            result = {
+                "input_ids": [
+                    2 + (sum(match.group().encode("utf-8")) % 27)
+                    for match in matches
+                ][:max_length]
+            }
+            if return_offsets_mapping:
+                result["offset_mapping"] = [
+                    (match.start(), match.end()) for match in matches[:max_length]
+                ]
+            return result
         encoded = [self.encode(text)[:max_length] for text in texts]
         width = max(max((len(ids) for ids in encoded), default=0), 1)
         input_ids = torch.zeros(len(encoded), width, dtype=torch.long)
@@ -486,6 +503,87 @@ class ComponentTests(unittest.TestCase):
         for path in Path("configs").glob("*.yaml"):
             config = load_config(path)
             self.assertGreater(config.data.max_rows, 0)
+
+    def test_serialized_cnn_residual_aligns_cells_and_backpropagates(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig(experiment_type="serialized_cnn_residual")
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_cell_tokens = 4
+        config.data.max_question_tokens = 128
+        config.cell_encoder.cell_dim = 128
+        config.cell_encoder.mlp_type = "deep"
+        config.cell_encoder.deep_hidden_dim = 256
+        config.cnn.channels = 128
+        config.cnn.depth = 2
+        config.cnn_residual.insertion_layer = 1
+        config.cnn_residual.gate_init = 0.1
+        language_model = DummyLM()
+        model = SerializedCNNResidualQwen(language_model, tokenizer, config)
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer,
+            "serialized_cnn_residual",
+            4,
+            3,
+            128,
+            8,
+            training=True,
+        )([example])
+        prompt_ids, alignment = build_serialized_prompt_with_cell_alignment(
+            tokenizer,
+            example["question"],
+            example["table"],
+            4,
+            3,
+        )
+        self.assertEqual(
+            prompt_ids,
+            build_prompt_ids(
+                tokenizer,
+                example["question"],
+                example["table"],
+                "serialized",
+                4,
+                3,
+                False,
+            ),
+        )
+        self.assertIn(0, alignment)
+        self.assertIn(1, alignment)
+        self.assertIn(3, alignment)
+        self.assertIn(4, alignment)
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            tables=batch["tables"],
+            table_cell_indices=batch["table_cell_indices"],
+        )
+        output.loss.backward()
+        for module in [model.cell_encoder, model.table_cnn, model.projector]:
+            gradients = [
+                parameter.grad
+                for parameter in module.parameters()
+                if parameter.requires_grad and parameter.grad is not None
+            ]
+            self.assertTrue(gradients)
+            self.assertTrue(
+                any(torch.count_nonzero(gradient).item() for gradient in gradients)
+            )
+        self.assertIsNotNone(model.residual_gate.grad)
+        generated = model.generate(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            tables=batch["tables"],
+            table_cell_indices=batch["table_cell_indices"],
+            max_new_tokens=2,
+        )
+        self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
 
     def test_end_to_end_gradients(self):
         tokenizer = DummyTokenizer()

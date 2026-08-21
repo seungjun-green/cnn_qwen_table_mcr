@@ -245,6 +245,11 @@ def train_model(
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
+            model_kwargs: dict[str, Any] = {}
+            if config.experiment_type == "serialized_cnn_residual":
+                model_kwargs["table_cell_indices"] = batch[
+                    "table_cell_indices"
+                ].to(device)
             use_autocast = config.training.bf16 and device.type == "cuda"
             with torch.autocast(
                 device_type=device.type,
@@ -257,6 +262,7 @@ def train_model(
                     labels=labels,
                     tables=batch["tables"],
                     use_cache=False,
+                    **model_kwargs,
                 )
                 raw_loss = outputs.loss
                 loss = raw_loss / accumulation

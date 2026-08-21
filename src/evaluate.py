@@ -53,6 +53,11 @@ def evaluate_model(
     for batch in tqdm(loader, desc=description):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
+        generation_kwargs: dict[str, Any] = {}
+        if config.experiment_type == "serialized_cnn_residual":
+            generation_kwargs["table_cell_indices"] = batch[
+                "table_cell_indices"
+            ].to(device)
         generated = model.generate(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -61,6 +66,7 @@ def evaluate_model(
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
+            **generation_kwargs,
         )
         new_tokens = generated[:, input_ids.shape[1] :]
         predictions = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)

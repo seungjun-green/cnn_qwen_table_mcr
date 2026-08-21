@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -171,6 +172,229 @@ class TableCNNQwen(nn.Module):
     ) -> torch.Tensor:
         memory, memory_mask, _ = self.encode_tables(tables)
         with self._table_context(memory, memory_mask):
+            return self.language_model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs,
+            )
+
+
+class SerializedCNNResidualQwen(nn.Module):
+    """Add cell-aligned 2D CNN features to a serialized Qwen decoder layer."""
+
+    def __init__(
+        self,
+        language_model: nn.Module,
+        tokenizer: Any,
+        config: ExperimentConfig,
+    ) -> None:
+        super().__init__()
+        self.language_model = language_model
+        self.config_bundle = config
+        hidden_size = int(language_model.config.hidden_size)
+        cell_dim = config.cell_encoder.cell_dim
+        self.cell_encoder = CellEncoder(
+            tokenizer=tokenizer,
+            embedding_dim=hidden_size,
+            cell_dim=cell_dim,
+            pooling=config.cell_encoder.pooling,
+            mlp_type=config.cell_encoder.mlp_type,
+            max_rows=config.data.max_rows,
+            max_cols=config.data.max_cols,
+            max_cell_tokens=config.data.max_cell_tokens,
+            deep_hidden_dim=config.cell_encoder.deep_hidden_dim,
+        )
+        self.row_embeddings = nn.Embedding(config.data.max_rows, cell_dim)
+        self.column_embeddings = nn.Embedding(config.data.max_cols, cell_dim)
+        self.cell_type_embeddings = nn.Embedding(2, cell_dim)
+        for embedding in (
+            self.row_embeddings,
+            self.column_embeddings,
+            self.cell_type_embeddings,
+        ):
+            nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+        self.structure_dropout = nn.Dropout(config.cnn_residual.dropout)
+        self.table_cnn = TableCNN(
+            cell_dim=cell_dim,
+            channels=config.cnn.channels,
+            depth=config.cnn.depth,
+            kernel_size=config.cnn.kernel_size,
+            residual=config.cnn.residual,
+        )
+        self.projector = TableProjector(config.cnn.channels, hidden_size)
+        self.residual_norm = nn.RMSNorm(hidden_size, elementwise_affine=False)
+        gate_init = float(config.cnn_residual.gate_init)
+        raw_gate = 0.0 if gate_init == 0 else math.atanh(gate_init)
+        self.residual_gate = nn.Parameter(torch.tensor(raw_gate))
+        self.backbone_frozen = config.model.freeze_backbone
+        self.lora_enabled = config.lora.enabled
+        if self.backbone_frozen and not self.lora_enabled:
+            self.language_model.requires_grad_(False)
+
+        layers = _decoder_layers(language_model)
+        layer_index = config.cnn_residual.insertion_layer
+        if not 0 <= layer_index < len(layers):
+            raise ValueError(
+                f"cnn_residual.insertion_layer={layer_index} is outside the "
+                f"model's {len(layers)} layers"
+            )
+        self.insertion_layer = layer_index
+        self._active_token_residual: torch.Tensor | None = None
+        self._hook_handle = layers[layer_index].register_forward_hook(
+            self._injection_hook
+        )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.backbone_frozen and not self.lora_enabled:
+            self.language_model.eval()
+        return self
+
+    def _add_structure(
+        self, cell_grid: torch.Tensor, cell_mask: torch.Tensor
+    ) -> torch.Tensor:
+        batch_size, rows, columns, _ = cell_grid.shape
+        device = cell_grid.device
+        structure = torch.zeros_like(cell_grid)
+        residual_config = self.config_bundle.cnn_residual
+        if residual_config.use_row_embeddings:
+            row_ids = torch.arange(rows, device=device).view(1, rows, 1)
+            structure = structure + self.row_embeddings(row_ids)
+        if residual_config.use_column_embeddings:
+            column_ids = torch.arange(columns, device=device).view(1, 1, columns)
+            structure = structure + self.column_embeddings(column_ids)
+        if residual_config.use_cell_type_embeddings:
+            cell_types = torch.ones(rows, columns, dtype=torch.long, device=device)
+            cell_types[0] = 0
+            structure = structure + self.cell_type_embeddings(cell_types)
+        mask = cell_mask.view(batch_size, rows, columns, 1).to(cell_grid.dtype)
+        return (cell_grid + self.structure_dropout(structure)) * mask
+
+    def encode_tables(
+        self, tables: Sequence[Table]
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, tuple[int, ...]]]:
+        embeddings = self.language_model.get_input_embeddings()
+        cell_grid, cell_mask = self.cell_encoder(tables, embeddings)
+        structured_grid = self._add_structure(cell_grid, cell_mask)
+        cnn_output = self.table_cnn(structured_grid, cell_mask)
+        memory, memory_mask = self.projector(cnn_output, cell_mask)
+        shapes = {
+            "cell_grid": tuple(cell_grid.shape),
+            "structured_grid": tuple(structured_grid.shape),
+            "cnn_output": tuple(cnn_output.shape),
+            "flattened_cnn": (
+                cnn_output.shape[0],
+                cnn_output.shape[2] * cnn_output.shape[3],
+                cnn_output.shape[1],
+            ),
+            "table_memory": tuple(memory.shape),
+        }
+        return memory, memory_mask, shapes
+
+    def _align_residual(
+        self,
+        memory: torch.Tensor,
+        memory_mask: torch.Tensor,
+        table_cell_indices: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        indices = table_cell_indices.to(memory.device)
+        if indices.shape != attention_mask.shape:
+            raise ValueError(
+                "table_cell_indices must have the same shape as attention_mask"
+            )
+        if memory.shape[0] != indices.shape[0]:
+            raise ValueError("Table memory and token alignment batch sizes differ")
+        safe_indices = indices.clamp(min=0)
+        gathered = memory.gather(
+            1, safe_indices.unsqueeze(-1).expand(-1, -1, memory.shape[-1])
+        )
+        valid = indices.ge(0)
+        valid = valid & attention_mask.to(device=memory.device, dtype=torch.bool)
+        valid_cells = memory_mask.gather(1, safe_indices)
+        valid = valid & valid_cells
+        residual = self.residual_norm(gathered)
+        return self.structure_dropout(residual) * valid.unsqueeze(-1).to(memory.dtype)
+
+    def _injection_hook(self, module: nn.Module, inputs: Any, output: Any) -> Any:
+        del module, inputs
+        residual = self._active_token_residual
+        if residual is None:
+            return output
+        hidden = output[0] if isinstance(output, tuple) else output
+        if not isinstance(hidden, torch.Tensor):
+            raise TypeError(
+                f"Unsupported decoder layer output: {type(hidden).__name__}"
+            )
+        # The prompt prefill has the aligned sequence length. Cached generation
+        # later passes only the newly generated token, which receives no residual.
+        if hidden.shape[1] != residual.shape[1]:
+            return output
+        if hidden.shape[0] != residual.shape[0]:
+            if hidden.shape[0] % residual.shape[0]:
+                raise ValueError("Cannot expand the CNN residual to generation beams")
+            residual = residual.repeat_interleave(
+                hidden.shape[0] // residual.shape[0], dim=0
+            )
+        injected = hidden + torch.tanh(self.residual_gate) * residual
+        if isinstance(output, tuple):
+            return (injected, *output[1:])
+        return injected
+
+    @contextmanager
+    def _residual_context(self, residual: torch.Tensor) -> Iterator[None]:
+        if self._active_token_residual is not None:
+            raise RuntimeError("Nested CNN residual contexts are not supported")
+        self._active_token_residual = residual
+        try:
+            yield
+        finally:
+            self._active_token_residual = None
+
+    def _token_residual(
+        self,
+        tables: Sequence[Table],
+        table_cell_indices: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        memory, memory_mask, _ = self.encode_tables(tables)
+        return self._align_residual(
+            memory, memory_mask, table_cell_indices, attention_mask
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        tables: Sequence[Table],
+        table_cell_indices: torch.Tensor,
+        labels: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        residual = self._token_residual(
+            tables, table_cell_indices, attention_mask
+        )
+        with self._residual_context(residual):
+            return self.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                **kwargs,
+            )
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        tables: Sequence[Table],
+        table_cell_indices: torch.Tensor,
+        **generation_kwargs: Any,
+    ) -> torch.Tensor:
+        residual = self._token_residual(
+            tables, table_cell_indices, attention_mask
+        )
+        with self._residual_context(residual):
             return self.language_model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -593,6 +817,8 @@ def build_model(
         model = ContinuousPrefixQwen(language_model, tokenizer, config)
     elif config.experiment_type == "structured_2d":
         model = Structured2DQwen(language_model, tokenizer, config)
+    elif config.experiment_type == "serialized_cnn_residual":
+        model = SerializedCNNResidualQwen(language_model, tokenizer, config)
     else:
         model = SerializedTableQwen(
             language_model,

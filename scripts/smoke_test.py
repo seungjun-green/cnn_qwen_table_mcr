@@ -16,9 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.config import load_config
-from src.data import MRCBatchCollator, load_wtq, normalize_table
+from src.data import (
+    MRCBatchCollator,
+    build_prompt_ids,
+    build_serialized_prompt_with_cell_alignment,
+    load_wtq,
+    normalize_table,
+)
 from src.model import (
     ContinuousPrefixQwen,
+    SerializedCNNResidualQwen,
     Structured2DQwen,
     TableCNNQwen,
     build_model,
@@ -50,7 +57,13 @@ def assert_gradient(name: str, module: torch.nn.Module) -> float:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    supported_types = {"cnn", "continuous_prefix", "serialized", "structured_2d"}
+    supported_types = {
+        "cnn",
+        "continuous_prefix",
+        "serialized",
+        "structured_2d",
+        "serialized_cnn_residual",
+    }
     if config.experiment_type not in supported_types:
         raise ValueError(
             "Unsupported experiment type for the smoke test"
@@ -84,11 +97,45 @@ def main() -> None:
         selection_neighbor_radius=config.data.selection_neighbor_radius,
     )
     batch = collator([example])
+    if isinstance(model, SerializedCNNResidualQwen):
+        residual_prompt, alignment = build_serialized_prompt_with_cell_alignment(
+            tokenizer,
+            str(example["question"]),
+            batch["tables"][0],
+            config.data.max_rows,
+            config.data.max_cols,
+            False,
+        )
+        baseline_prompt = build_prompt_ids(
+            tokenizer,
+            str(example["question"]),
+            batch["tables"][0],
+            "serialized",
+            config.data.max_rows,
+            config.data.max_cols,
+            False,
+        )
+        if residual_prompt != baseline_prompt:
+            raise AssertionError(
+                "CNN residual prompt tokens differ from the serialized baseline"
+            )
+        print(
+            "Aligned serialized table tokens: "
+            f"{sum(cell_index >= 0 for cell_index in alignment)}"
+        )
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
     labels = batch["labels"].to(device)
     model.train()
-    if isinstance(model, (TableCNNQwen, ContinuousPrefixQwen, Structured2DQwen)):
+    if isinstance(
+        model,
+        (
+            TableCNNQwen,
+            ContinuousPrefixQwen,
+            Structured2DQwen,
+            SerializedCNNResidualQwen,
+        ),
+    ):
         memory, memory_mask, shapes = model.encode_tables(batch["tables"])
         if "cell_grid" in shapes:
             print(f"After cell MLP: {shapes['cell_grid']}")
@@ -102,18 +149,29 @@ def main() -> None:
         print(f"Valid table positions: {int(memory_mask.sum())}")
         del memory
 
+    model_kwargs = {}
+    if isinstance(model, SerializedCNNResidualQwen):
+        model_kwargs["table_cell_indices"] = batch["table_cell_indices"].to(device)
     outputs = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
         labels=labels,
         tables=batch["tables"],
         use_cache=False,
+        **model_kwargs,
     )
     loss = outputs.loss
     if not torch.isfinite(loss):
         raise AssertionError(f"Loss is not finite: {loss}")
     print(f"Loss: {float(loss.detach().float()):.8f}")
     loss.backward()
+    if isinstance(model, SerializedCNNResidualQwen):
+        if float(torch.tanh(model.residual_gate).detach().float()) == 0.0:
+            assert_gradient("CNN residual gate", model.residual_gate)
+        else:
+            assert_gradient("cell encoder", model.cell_encoder)
+            assert_gradient("CNN", model.table_cnn)
+            assert_gradient("projector", model.projector)
     if isinstance(model, (TableCNNQwen, ContinuousPrefixQwen)):
         assert_gradient("cell encoder", model.cell_encoder)
         assert_gradient("CNN", model.table_cnn)
@@ -144,6 +202,11 @@ def main() -> None:
     generation_batch = eval_collator([example])
     generation_input = generation_batch["input_ids"].to(device)
     generation_mask = generation_batch["attention_mask"].to(device)
+    generation_kwargs = {}
+    if isinstance(model, SerializedCNNResidualQwen):
+        generation_kwargs["table_cell_indices"] = generation_batch[
+            "table_cell_indices"
+        ].to(device)
     generated = model.generate(
         input_ids=generation_input,
         attention_mask=generation_mask,
@@ -152,6 +215,7 @@ def main() -> None:
         do_sample=False,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
+        **generation_kwargs,
     )
     answer = tokenizer.decode(
         generated[0, generation_input.shape[1] :], skip_special_tokens=True

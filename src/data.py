@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-import re
 from typing import Any
 
 import torch
@@ -191,6 +191,142 @@ def serialize_table(raw_table: Any, max_rows: int, max_cols: int) -> str:
     return "\n".join(lines)
 
 
+def _serialize_table_with_cell_spans(
+    raw_table: Any, max_rows: int, max_cols: int
+) -> tuple[str, list[tuple[int, int, int]]]:
+    """Serialize a table and retain character spans for each non-empty cell."""
+    table = truncate_table(normalize_table(raw_table), max_rows, max_cols)
+    pieces: list[str] = []
+    spans: list[tuple[int, int, int]] = []
+    offset = 0
+    grid = [table.header, *table.rows]
+    for row_index, row in enumerate(grid):
+        if row_index:
+            pieces.append("\n")
+            offset += 1
+        for column_index, value in enumerate(row):
+            if column_index:
+                pieces.append(" | ")
+                offset += 3
+            value = str(value)
+            start = offset
+            pieces.append(value)
+            offset += len(value)
+            if value:
+                spans.append(
+                    (start, offset, row_index * max_cols + column_index)
+                )
+    return "".join(pieces), spans
+
+
+def _render_chat_prompt(
+    tokenizer: Any,
+    question: str,
+    system_prompt: str,
+    enable_thinking: bool | None,
+) -> str:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": str(question)},
+    ]
+    if getattr(tokenizer, "chat_template", None):
+        template_kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        return str(tokenizer.apply_chat_template(messages, **template_kwargs))
+    return f"System: {system_prompt}\nUser: {question}\nAssistant:"
+
+
+def _tokenize_with_offsets(
+    tokenizer: Any, text: str
+) -> tuple[list[int], list[tuple[int, int]]] | None:
+    try:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+    except (TypeError, ValueError, NotImplementedError):
+        return None
+    input_ids = encoded["input_ids"]
+    offsets = encoded.get("offset_mapping")
+    if offsets is None:
+        return None
+    if isinstance(input_ids, torch.Tensor):
+        input_ids = input_ids.tolist()
+    if isinstance(offsets, torch.Tensor):
+        offsets = offsets.tolist()
+    if input_ids and isinstance(input_ids[0], list):
+        input_ids = input_ids[0]
+    if offsets and isinstance(offsets[0], list) and offsets[0] and isinstance(
+        offsets[0][0], list
+    ):
+        offsets = offsets[0]
+    return list(input_ids), [tuple(pair) for pair in offsets]
+
+
+def build_serialized_prompt_with_cell_alignment(
+    tokenizer: Any,
+    question: str,
+    table: Any,
+    max_rows: int,
+    max_cols: int,
+    enable_thinking: bool | None = False,
+) -> tuple[list[int], list[int]]:
+    """Build the normal serialized prompt plus a flat cell index per token."""
+    table_text, local_spans = _serialize_table_with_cell_spans(
+        table, max_rows, max_cols
+    )
+    user_content = f"Table:\n{table_text}\n\nQuestion: {question}"
+    rendered = _render_chat_prompt(
+        tokenizer,
+        user_content,
+        SERIALIZED_SYSTEM_PROMPT,
+        enable_thinking,
+    )
+    encoded = _tokenize_with_offsets(tokenizer, rendered)
+    if encoded is None:
+        # Slow/custom tokenizers without offset mappings can still run the
+        # serialized model, but cannot safely align repeated cell values.
+        raise TypeError(
+            "serialized_cnn_residual requires a fast tokenizer with "
+            "return_offsets_mapping support"
+        )
+    input_ids, offsets = encoded
+    content_start = rendered.find(user_content)
+    if content_start < 0:
+        raise ValueError("Could not locate the serialized user content in the prompt")
+    table_start = content_start + len("Table:\n")
+    spans = [
+        (table_start + start, table_start + stop, cell_index)
+        for start, stop, cell_index in local_spans
+    ]
+    alignment = [-1] * len(input_ids)
+    span_cursor = 0
+    for token_index, (token_start, token_stop) in enumerate(offsets):
+        if token_stop <= token_start:
+            continue
+        while span_cursor < len(spans) and spans[span_cursor][1] <= token_start:
+            span_cursor += 1
+        candidate = span_cursor
+        best_overlap = 0
+        best_cell = -1
+        while candidate < len(spans) and spans[candidate][0] < token_stop:
+            start, stop, cell_index = spans[candidate]
+            overlap = min(token_stop, stop) - max(token_start, start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_cell = cell_index
+            candidate += 1
+        alignment[token_index] = best_cell
+    if not any(cell_index >= 0 for cell_index in alignment):
+        raise ValueError("No serialized table tokens could be aligned to table cells")
+    return input_ids, alignment
+
+
 def load_wtq(dataset_name: str, revision: str):
     from datasets import load_dataset
 
@@ -229,7 +365,7 @@ def build_prompt_ids(
     max_cols: int = 8,
     enable_thinking: bool | None = None,
 ) -> list[int]:
-    if experiment_type == "serialized":
+    if experiment_type in {"serialized", "serialized_cnn_residual"}:
         text_table = serialize_table(table, max_rows, max_cols)
         question = f"Table:\n{text_table}\n\nQuestion: {question}"
         return _prompt_ids(
@@ -308,7 +444,13 @@ class MRCBatchCollator:
         self.selection_neighbor_radius = selection_neighbor_radius
         self.enable_thinking = (
             False
-            if experiment_type in {"continuous_prefix", "serialized", "structured_2d"}
+            if experiment_type
+            in {
+                "continuous_prefix",
+                "serialized",
+                "structured_2d",
+                "serialized_cnn_residual",
+            }
             and enable_thinking is None
             else enable_thinking
         )
@@ -316,6 +458,7 @@ class MRCBatchCollator:
     def __call__(self, examples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         sequences: list[list[int]] = []
         labels: list[list[int]] = []
+        cell_alignments: list[list[int]] = []
         tables: list[Table] = []
         questions: list[str] = []
         example_ids: list[str] = []
@@ -342,15 +485,28 @@ class MRCBatchCollator:
             answers = extract_answers(example)
             if self.training and not answers:
                 raise ValueError("Training example has no answer")
-            prompt = build_prompt_ids(
-                self.tokenizer,
-                question,
-                table,
-                self.experiment_type,
-                self.max_rows,
-                self.max_cols,
-                self.enable_thinking,
-            )[-self.max_question_tokens :]
+            if self.experiment_type == "serialized_cnn_residual":
+                prompt, prompt_alignment = build_serialized_prompt_with_cell_alignment(
+                    self.tokenizer,
+                    question,
+                    table,
+                    self.max_rows,
+                    self.max_cols,
+                    self.enable_thinking,
+                )
+                prompt = prompt[-self.max_question_tokens :]
+                prompt_alignment = prompt_alignment[-self.max_question_tokens :]
+            else:
+                prompt = build_prompt_ids(
+                    self.tokenizer,
+                    question,
+                    table,
+                    self.experiment_type,
+                    self.max_rows,
+                    self.max_cols,
+                    self.enable_thinking,
+                )[-self.max_question_tokens :]
+                prompt_alignment = [-1] * len(prompt)
             if self.training:
                 answer_text = serialize_answers(
                     answers, self.answer_mode, self.answer_separator
@@ -360,11 +516,14 @@ class MRCBatchCollator:
                 )[: self.max_answer_tokens]
                 sequence = prompt + answer_ids + [eos_id]
                 label = [-100] * len(prompt) + answer_ids + [eos_id]
+                alignment = prompt_alignment + [-1] * (len(answer_ids) + 1)
             else:
                 sequence = prompt
                 label = [-100] * len(prompt)
+                alignment = prompt_alignment
             sequences.append(sequence)
             labels.append(label)
+            cell_alignments.append(alignment)
             tables.append(table)
             questions.append(question)
             example_ids.append(str(example.get("id", "")))
@@ -379,17 +538,24 @@ class MRCBatchCollator:
         input_ids = torch.full((len(sequences), max_length), pad_id, dtype=torch.long)
         attention_mask = torch.zeros((len(sequences), max_length), dtype=torch.long)
         label_tensor = torch.full((len(sequences), max_length), -100, dtype=torch.long)
-        for index, (sequence, label) in enumerate(zip(sequences, labels)):
+        cell_index_tensor = torch.full(
+            (len(sequences), max_length), -1, dtype=torch.long
+        )
+        for index, (sequence, label, alignment) in enumerate(
+            zip(sequences, labels, cell_alignments)
+        ):
             length = len(sequence)
             start = 0 if self.training else max_length - length
             stop = start + length
             input_ids[index, start:stop] = torch.tensor(sequence)
             attention_mask[index, start:stop] = 1
             label_tensor[index, start:stop] = torch.tensor(label)
+            cell_index_tensor[index, start:stop] = torch.tensor(alignment)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": label_tensor,
+            "table_cell_indices": cell_index_tensor,
             "tables": tables,
             "questions": questions,
             "example_ids": example_ids,

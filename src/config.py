@@ -77,6 +77,16 @@ class Structure2DConfig:
 
 
 @dataclass
+class CNNResidualConfig:
+    insertion_layer: int = 13
+    gate_init: float = 0.0
+    dropout: float = 0.05
+    use_row_embeddings: bool = True
+    use_column_embeddings: bool = True
+    use_cell_type_embeddings: bool = True
+
+
+@dataclass
 class EvaluationConfig:
     primary_metric: str = "exact_match"
     official_data_dir: str | None = None
@@ -122,6 +132,7 @@ class ExperimentConfig:
     cross_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
     structure_2d: Structure2DConfig = field(default_factory=Structure2DConfig)
+    cnn_residual: CNNResidualConfig = field(default_factory=CNNResidualConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
@@ -135,6 +146,7 @@ class ExperimentConfig:
             "continuous_prefix",
             "serialized",
             "structured_2d",
+            "serialized_cnn_residual",
         }
         if self.experiment_type not in supported_experiments:
             choices = ", ".join(sorted(supported_experiments))
@@ -181,6 +193,12 @@ class ExperimentConfig:
             raise ValueError("structure_2d.dropout must be in [0, 1)")
         if self.structure_2d.initial_scale < 0:
             raise ValueError("structure_2d.initial_scale cannot be negative")
+        if self.cnn_residual.insertion_layer < 0:
+            raise ValueError("cnn_residual.insertion_layer cannot be negative")
+        if not 0 <= self.cnn_residual.gate_init < 1:
+            raise ValueError("cnn_residual.gate_init must be in [0, 1)")
+        if not 0 <= self.cnn_residual.dropout < 1:
+            raise ValueError("cnn_residual.dropout must be in [0, 1)")
         if self.evaluation.primary_metric not in {
             "exact_match",
             "denotation_accuracy",
@@ -212,6 +230,7 @@ _SECTIONS: dict[str, type[Any]] = {
     "cross_attention": CrossAttentionConfig,
     "lora": LoRAConfig,
     "structure_2d": Structure2DConfig,
+    "cnn_residual": CNNResidualConfig,
     "evaluation": EvaluationConfig,
     "training": TrainingConfig,
     "generation": GenerationConfig,

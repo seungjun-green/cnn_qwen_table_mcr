@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Also copy run artifacts here at checkpoints and epoch boundaries",
     )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Override the config output directory (for example, a Google Drive path)",
+    )
     resume_group = parser.add_mutually_exclusive_group()
     resume_group.add_argument(
         "--resume-from",
@@ -44,6 +49,8 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
+    if args.output_dir:
+        config.training.output_dir = args.output_dir
     if args.mirror_output_dir:
         config.training.mirror_output_dir = args.mirror_output_dir
     if args.resume_from:
@@ -80,6 +87,15 @@ def main() -> None:
             f"column={config.structure_2d.use_column_embeddings} | "
             f"cell_type={config.structure_2d.use_cell_type_embeddings} | "
             f"table_tokens={config.data.max_table_tokens}",
+            flush=True,
+        )
+    if config.experiment_type == "serialized_cnn_residual":
+        print(
+            f"CNN RESIDUAL: pooling={config.cell_encoder.pooling} | "
+            f"channels={config.cnn.channels} | depth={config.cnn.depth} | "
+            f"kernel={config.cnn.kernel_size} | "
+            f"after_layer={config.cnn_residual.insertion_layer + 1} | "
+            f"gate_init={config.cnn_residual.gate_init}",
             flush=True,
         )
     print(
