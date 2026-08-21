@@ -1,9 +1,10 @@
 # Table-CNN MRC
 
-A config-driven research implementation for testing whether a 2D CNN over semantic
-table-cell embeddings can improve table question answering on WikiTableQuestions.
+A config-driven research implementation for table question answering on
+WikiTableQuestions. It retains the original 2D-CNN experiments and now includes a
+structure-aware lexical-token model developed from their diagnostic results.
 
-The repository now supports two Table-CNN fusion strategies. The original model
+The repository supports two historical Table-CNN fusion strategies. The original model
 keeps the two modalities separate:
 
 ```text
@@ -17,7 +18,7 @@ table → Qwen embeddings → cell pooling → MLP → 2D CNN → projector
 The decoder prompt contains the question only. The table becomes cross-attention
 memory after decoder layer 13 by default.
 
-The recommended continuous-prefix experiment instead uses one ordinary causal
+The continuous-prefix experiment instead uses one ordinary causal
 decoder and no cross-attention module:
 
 ```text
@@ -31,7 +32,7 @@ Loss is masked for every table and question position, so only answer tokens are
 training targets. A separate serialized-table baseline remains available in
 `configs/serialized_table.yaml`.
 
-The recommended training config adds LoRA adapters to Qwen's self-attention while
+Its LoRA config adds adapters to Qwen's self-attention while
 keeping its pretrained weights frozen. The table encoder, projector, and adapters
 are optimized jointly:
 
@@ -42,6 +43,22 @@ are optimized jointly:
                          ↓
                        answer
 ```
+
+The current proposed model preserves the table's lexical tokens and adds lightweight
+2D structure instead of compressing cells through a CNN:
+
+```text
+question ──→ deterministic relevant row/column selection ─┐
+table ─────→ lexical table tokens                          │
+              + learned row embeddings                    ├→ Qwen + LoRA → answer set
+              + learned column embeddings                 │
+              + learned header/data embeddings ───────────┘
+```
+
+`configs/serialized_table_lora.yaml` is the corrected standard baseline,
+`configs/serialized_retrieval_lora.yaml` isolates the selector contribution, and
+`configs/structured_2d_lora.yaml` is the proposed model. All three train on every
+gold denotation item and choose checkpoints using official WTQ denotation accuracy.
 
 ## Quick start
 
@@ -78,6 +95,16 @@ Train the recommended LoRA version:
 ```bash
 python scripts/smoke_test.py --config configs/continuous_prefix_lora.yaml
 python scripts/run_experiment.py --config configs/continuous_prefix_lora.yaml
+```
+
+Run the new controlled structure-aware experiments:
+
+```bash
+python scripts/smoke_test.py --config configs/serialized_table_lora.yaml
+python scripts/run_experiment.py --config configs/serialized_table_lora.yaml
+
+python scripts/smoke_test.py --config configs/structured_2d_lora.yaml
+python scripts/run_experiment.py --config configs/structured_2d_lora.yaml
 ```
 
 Evaluate a saved checkpoint on validation:
@@ -135,6 +162,21 @@ Qwen parameters remain frozen. LoRA is configured through the top-level `lora`
 section; set `enabled: false` for the frozen-decoder ablation. The integration uses
 Hugging Face's [PEFT LoRA API](https://huggingface.co/docs/peft/package_reference/lora).
 
+### Structure-aware lexical-token model
+
+`structured_2d` first applies deterministic question-conditioned selection. Columns
+are ranked using question overlap with headers and cell values. Rows are ranked by
+question/value overlap, and neighboring rows are retained so that `before`, `after`,
+and adjacent-row questions keep their local context. Selected rows and columns remain
+in original table order.
+
+The selected cells are tokenized without pooling. Qwen receives its own pretrained
+token embeddings plus learned row, column, and header/data-type embeddings. A learned
+scale starts the structural contribution small, while Qwen LoRA and the structure
+embeddings train jointly. The table prefix is capped by `max_table_tokens`; question
+and answer labels follow it through the same causal decoder, and all table/question
+positions remain masked from the language-model loss.
+
 ## Data behavior
 
 The dataset is loaded exactly as:
@@ -146,20 +188,24 @@ load_dataset(
 )
 ```
 
-`max_rows` is the total grid height including the header. A `32 × 8` config therefore
-keeps the header, the first 31 data rows, and the first 8 columns. This convention
-ensures the memory length is at most `max_rows * max_cols`. Truncation is isolated in
-`src/data.py` so it can later be replaced by learned or heuristic selection.
+`max_rows` is the total grid height including the header. In `leading` mode, a
+`32 × 8` config keeps the header, first 31 data rows, and first 8 columns. In
+`question_relevance` mode, it keeps up to 31 ranked rows plus their neighbors and up
+to 8 ranked columns, restoring original order after selection.
 
-The first accepted answer is used for training. During evaluation, a prediction is
-correct if it matches any accepted answer after stripping, lowercasing, and collapsing
-repeated whitespace.
+Legacy configs continue to train on the first accepted answer and legacy Exact Match.
+The new configs use `answer_mode: all`, join answer items with ` | `, and download the
+official WTQ 1.0.2 tagged targets once. Validation, early stopping, and best-checkpoint
+selection then use complete-denotation accuracy: predicted and target sets must have
+equal sizes and every target item must match.
 
 ## Configuration
 
-`configs/continuous_prefix_lora.yaml` is the recommended single-decoder experiment,
-`configs/continuous_prefix.yaml` is its frozen-Qwen ablation, and
-`configs/baseline.yaml` is the original cross-attention CNN experiment. Included
+`configs/structured_2d_lora.yaml` is the proposed experiment,
+`configs/serialized_table_lora.yaml` is its standard baseline, and
+`configs/serialized_retrieval_lora.yaml` attributes gains from selection separately
+from 2D embeddings. `configs/continuous_prefix_lora.yaml` remains the diagnosed CNN
+ablation and `configs/baseline.yaml` is the original cross-attention CNN. Included
 one-variable variants cover:
 
 - pooling: mean, max, attention
@@ -358,6 +404,15 @@ The checkpoint was trained only against `answers[0]`, so this audit diagnoses th
 existing model; it does not retroactively fix its target objective. Retraining with
 all denotation items should be done only after reviewing these results.
 
+## Structure-aware Colab workflow
+
+Open `notebooks/structured_2d_colab.ipynb`. It sets up the repository and Drive,
+lets you choose one of the three controlled configs, runs the appropriate gradient
+smoke test, trains or resumes from a distinct persistent checkpoint, compares
+completed histories, and audits the best checkpoint with correct and shuffled tables.
+Run `serialized_table_lora` first and `structured_2d_lora` second; the retrieval-only
+configuration is the follow-up ablation.
+
 ## Local tests
 
 The component suite requires no model or dataset download:
@@ -366,25 +421,26 @@ The component suite requires no model or dataset download:
 python -m unittest discover -s tests -v
 ```
 
-It checks configuration loading, masking and truncation, decoder injection,
-continuous-prefix construction, answer-only loss masking, loss and gradient flow,
-atomic full-checkpoint restoration, output mirroring, early stopping, and
-completed-run auto-resume.
+It checks configuration loading, masking and selection, complete-answer targets,
+decoder injection, continuous-prefix and structured-2D construction, answer-only loss
+masking, structural/LoRA gradient flow, denotation scoring, atomic full-checkpoint
+restoration, output mirroring, early stopping, and completed-run auto-resume.
 
 ## Repository layout
 
 ```text
 configs/                 experiment YAML files
 src/config.py            strict dataclass configuration
-src/data.py              WTQ loading, prompts, batching, truncation
+src/data.py              WTQ loading, prompts, selection, answer targets, batching
 src/pooling.py           mean/max/attention token pooling
 src/cell_encoder.py      batched cell encoding and MLP
 src/table_cnn.py         masked 2D CNN and projector
 src/cross_attention.py   gated multi-head cross-attention
 src/checkpointing.py     atomic full-state save and resume
-src/model.py             cross-attention, continuous-prefix, and serialized wrappers
+src/model.py             CNN, continuous-prefix, serialized, and structured-2D models
 src/train.py             training loop and run artifacts
-src/evaluate.py          deterministic Exact Match evaluation
+src/evaluate.py          deterministic Exact Match and denotation evaluation
+src/wtq_evaluation.py    official WTQ value matching and coverage audits
 scripts/                 command-line entry points
 tests/                   download-free integration tests
 notebooks/               thin Colab runner

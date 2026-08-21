@@ -1,0 +1,57 @@
+experiment_type: structured_2d
+
+model:
+  name: Qwen/Qwen3-1.7B
+  freeze_backbone: true
+
+data:
+  dataset: stanfordnlp/wikitablequestions
+  revision: refs/pr/4
+  max_rows: 32
+  max_cols: 8
+  max_question_tokens: 512
+  max_answer_tokens: 128
+  max_table_tokens: 2048
+  answer_mode: all
+  answer_separator: " | "
+  table_selection: question_relevance
+  selection_neighbor_radius: 1
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  bias: none
+
+structure_2d:
+  dropout: 0.05
+  initial_scale: 0.1
+  use_row_embeddings: true
+  use_column_embeddings: true
+  use_cell_type_embeddings: true
+
+evaluation:
+  primary_metric: denotation_accuracy
+
+training:
+  bf16: true
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
+  epochs: 10
+  seed: 42
+  checkpoint_every_steps: 100
+  early_stopping_patience: 3
+  early_stopping_min_delta: 0.0
+  auto_resume: true
+  output_dir: outputs/structured_2d_lora
+
+generation:
+  max_new_tokens: 64

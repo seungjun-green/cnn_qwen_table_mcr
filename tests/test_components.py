@@ -17,9 +17,21 @@ from src.checkpointing import (
     save_training_checkpoint,
 )
 from src.config import ExperimentConfig, load_config
-from src.data import MRCBatchCollator, Table, build_prompt_ids, truncate_table
+from src.data import (
+    MRCBatchCollator,
+    Table,
+    build_prompt_ids,
+    select_table_for_question,
+    serialize_answers,
+    truncate_table,
+)
 from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
-from src.model import ContinuousPrefixQwen, TableCNNQwen, build_model
+from src.model import (
+    ContinuousPrefixQwen,
+    Structured2DQwen,
+    TableCNNQwen,
+    build_model,
+)
 from src.pooling import TokenPooler
 from src.train import train_model
 from src.utils import mirror_directory
@@ -428,6 +440,48 @@ class ComponentTests(unittest.TestCase):
         truncated = truncate_table(table, max_rows=3, max_cols=2)
         self.assertEqual(truncated.shape, (3, 2))
 
+    def test_question_relevance_selection_keeps_matching_row_and_neighbor(self):
+        rows = [[str(index), f"Player {index}", "Back", "School"] for index in range(45)]
+        rows[40][1] = "Frank Burns"
+        rows[41][1] = "Frank Ziegler"
+        table = Table(["Pick", "Player", "Position", "School"], rows)
+        selected = select_table_for_question(
+            table,
+            "who was picked after Frank Burns?",
+            max_rows=4,
+            max_cols=3,
+            neighbor_radius=1,
+        )
+        flattened = {cell for row in selected.rows for cell in row}
+        self.assertEqual(selected.shape, (4, 3))
+        self.assertIn("Frank Burns", flattened)
+        self.assertIn("Frank Ziegler", flattened)
+
+    def test_all_answer_targets_use_explicit_separator(self):
+        self.assertEqual(
+            serialize_answers(["first", "second"], "all", " | "),
+            "first | second",
+        )
+        tokenizer = DummyTokenizer()
+        example = {
+            "question": "list both",
+            "answers": ["first", "second"],
+            "table": {"header": ["value"], "rows": [["first"], ["second"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer,
+            "serialized",
+            4,
+            3,
+            64,
+            16,
+            training=True,
+            answer_mode="all",
+        )([example])
+        expected_answer_ids = tokenizer.encode("first | second")
+        supervised = batch["labels"][0][batch["labels"][0] != -100].tolist()
+        self.assertEqual(supervised, expected_answer_ids + [tokenizer.eos_token_id])
+
     def test_all_configs_load(self):
         for path in Path("configs").glob("*.yaml"):
             config = load_config(path)
@@ -546,6 +600,54 @@ class ComponentTests(unittest.TestCase):
         )
         self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
 
+    def test_structured_2d_uses_lexical_tokens_and_trainable_structure(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig(experiment_type="structured_2d")
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_table_tokens = 64
+        language_model = DummyLM()
+        model = Structured2DQwen(language_model, tokenizer, config)
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer, "structured_2d", 4, 3, 32, 8, training=True
+        )([example])
+        prefix, prefix_mask, shapes = model.encode_tables(batch["tables"])
+        self.assertEqual(shapes["table_prefix"], tuple(prefix.shape))
+        self.assertGreater(int(prefix_mask.sum()), 4)
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            tables=batch["tables"],
+        )
+        prefix_length = prefix.shape[1]
+        self.assertTrue(
+            torch.equal(
+                language_model.last_labels[:, :prefix_length],
+                torch.full((1, prefix_length), -100),
+            )
+        )
+        output.loss.backward()
+        for module in [
+            model.row_embeddings,
+            model.column_embeddings,
+            model.cell_type_embeddings,
+        ]:
+            self.assertIsNotNone(module.weight.grad)
+            self.assertGreater(torch.count_nonzero(module.weight.grad).item(), 0)
+        generated = model.generate(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            tables=batch["tables"],
+            max_new_tokens=2,
+        )
+        self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
+
     def test_early_stopping_and_automatic_completed_run_resume(self):
         tokenizer = DummyTokenizer()
         config = ExperimentConfig()
@@ -602,6 +704,53 @@ class ComponentTests(unittest.TestCase):
                 )
                 self.assertEqual(resumed_history["status"], "early_stopped")
                 self.assertEqual(len(resumed_history["resume_events"]), 1)
+
+    def test_denotation_accuracy_controls_best_checkpoint_and_early_stopping(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig()
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_cell_tokens = 4
+        config.cell_encoder.cell_dim = 128
+        config.cnn.channels = 128
+        config.cross_attention.insertion_layer = 1
+        config.cross_attention.num_heads = 4
+        config.evaluation.primary_metric = "denotation_accuracy"
+        config.training.bf16 = False
+        config.training.batch_size = 1
+        config.training.gradient_accumulation_steps = 1
+        config.training.epochs = 3
+        config.training.checkpoint_every_steps = 0
+        config.training.early_stopping_patience = 1
+        example = {
+            "id": "example",
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        fake_metrics = {
+            "exact_match": 0.9,
+            "denotation_accuracy": 0.25,
+            "number_evaluated": 1,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            config.training.output_dir = temporary_directory
+            with (
+                patch("src.train._prepare_official_targets", return_value={}),
+                patch("src.train.evaluate_model", return_value=(fake_metrics, [])),
+            ):
+                history = train_model(
+                    TableCNNQwen(DummyLM(), tokenizer, config),
+                    tokenizer,
+                    [example],
+                    [example],
+                    config,
+                    torch.device("cpu"),
+                )
+        self.assertEqual(history["status"], "early_stopped")
+        self.assertEqual(history["primary_metric"], "denotation_accuracy")
+        self.assertEqual(history["best_metric"], 0.25)
+        self.assertEqual(history["best_denotation_accuracy"], 0.25)
 
 
 if __name__ == "__main__":

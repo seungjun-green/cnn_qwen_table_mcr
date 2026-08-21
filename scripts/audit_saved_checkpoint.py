@@ -246,6 +246,8 @@ def main() -> None:
         config.data.max_rows,
         config.data.max_cols,
         sample_limit=args.sample_count,
+        table_selection=config.data.table_selection,
+        selection_neighbor_radius=config.data.selection_neighbor_radius,
     )
     samples = _collect_samples(correct_records, shuffled_records, args.sample_count)
     summary = {

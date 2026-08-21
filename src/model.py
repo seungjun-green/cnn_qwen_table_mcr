@@ -319,6 +319,181 @@ class ContinuousPrefixQwen(nn.Module):
         return torch.cat([input_ids, generated_tokens], dim=1)
 
 
+class Structured2DQwen(nn.Module):
+    """Feed lexical table tokens to Qwen with learned 2D structural adapters."""
+
+    def __init__(
+        self,
+        language_model: nn.Module,
+        tokenizer: Any,
+        config: ExperimentConfig,
+    ) -> None:
+        super().__init__()
+        self.language_model = language_model
+        self.tokenizer = tokenizer
+        self.config_bundle = config
+        hidden_size = int(language_model.config.hidden_size)
+        self.row_embeddings = nn.Embedding(config.data.max_rows, hidden_size)
+        self.column_embeddings = nn.Embedding(config.data.max_cols, hidden_size)
+        self.cell_type_embeddings = nn.Embedding(3, hidden_size)
+        for embedding in (
+            self.row_embeddings,
+            self.column_embeddings,
+            self.cell_type_embeddings,
+        ):
+            nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+        self.structural_scale = nn.Parameter(
+            torch.tensor(float(config.structure_2d.initial_scale))
+        )
+        self.structural_dropout = nn.Dropout(config.structure_2d.dropout)
+        self.backbone_frozen = config.model.freeze_backbone
+        self.lora_enabled = config.lora.enabled
+        if self.backbone_frozen and not self.lora_enabled:
+            self.language_model.requires_grad_(False)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.backbone_frozen and not self.lora_enabled:
+            self.language_model.eval()
+        return self
+
+    def _tokenize_table(
+        self, table: Table
+    ) -> tuple[list[int], list[int], list[int], list[int]]:
+        token_ids: list[int] = []
+        row_ids: list[int] = []
+        column_ids: list[int] = []
+        cell_types: list[int] = []
+        budget = self.config_bundle.data.max_table_tokens
+
+        def add_piece(text: str, row: int, column: int, cell_type: int) -> bool:
+            piece = list(self.tokenizer.encode(text, add_special_tokens=False))
+            remaining = budget - len(token_ids)
+            if remaining <= 0:
+                return False
+            piece = piece[:remaining]
+            token_ids.extend(piece)
+            row_ids.extend([row] * len(piece))
+            column_ids.extend([column] * len(piece))
+            cell_types.extend([cell_type] * len(piece))
+            return len(token_ids) < budget
+
+        if not add_piece("Table:\n", 0, 0, 0):
+            return token_ids, row_ids, column_ids, cell_types
+        for column, header in enumerate(table.header):
+            separator = "" if column == 0 else " | "
+            if not add_piece(f"{separator}{header}", 0, column, 1):
+                return token_ids, row_ids, column_ids, cell_types
+        if not add_piece("\n", 0, 0, 0):
+            return token_ids, row_ids, column_ids, cell_types
+        for row_index, row in enumerate(table.rows, start=1):
+            if not add_piece(f"Row {row_index}: ", row_index, 0, 0):
+                break
+            for column, value in enumerate(row):
+                separator = "" if column == 0 else " | "
+                if not add_piece(
+                    f"{separator}{value}", row_index, column, 2
+                ):
+                    break
+            if len(token_ids) >= budget or not add_piece("\n", row_index, 0, 0):
+                break
+        return token_ids, row_ids, column_ids, cell_types
+
+    def encode_tables(
+        self, tables: Sequence[Table]
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, tuple[int, ...]]]:
+        encoded = [self._tokenize_table(table) for table in tables]
+        maximum = max((len(item[0]) for item in encoded), default=0)
+        if maximum < 1:
+            raise ValueError("Every structured table must produce at least one token")
+        device = self.language_model.get_input_embeddings().weight.device
+        token_tensor = torch.zeros(len(tables), maximum, dtype=torch.long, device=device)
+        row_tensor = torch.zeros_like(token_tensor)
+        column_tensor = torch.zeros_like(token_tensor)
+        type_tensor = torch.zeros_like(token_tensor)
+        mask = torch.zeros(len(tables), maximum, dtype=torch.bool, device=device)
+        for batch_index, (tokens, rows, columns, types) in enumerate(encoded):
+            length = len(tokens)
+            start = maximum - length
+            token_tensor[batch_index, start:] = torch.tensor(tokens, device=device)
+            row_tensor[batch_index, start:] = torch.tensor(rows, device=device)
+            column_tensor[batch_index, start:] = torch.tensor(columns, device=device)
+            type_tensor[batch_index, start:] = torch.tensor(types, device=device)
+            mask[batch_index, start:] = True
+
+        prefix = self.language_model.get_input_embeddings()(token_tensor)
+        structure = torch.zeros_like(prefix)
+        structure_config = self.config_bundle.structure_2d
+        if structure_config.use_row_embeddings:
+            structure = structure + self.row_embeddings(row_tensor)
+        if structure_config.use_column_embeddings:
+            structure = structure + self.column_embeddings(column_tensor)
+        if structure_config.use_cell_type_embeddings:
+            structure = structure + self.cell_type_embeddings(type_tensor)
+        prefix = prefix + self.structural_scale * self.structural_dropout(structure)
+        prefix = prefix * mask.unsqueeze(-1)
+        shapes = {
+            "table_prefix": tuple(prefix.shape),
+            "table_tokens": tuple(token_tensor.shape),
+        }
+        return prefix, mask, shapes
+
+    def _decoder_inputs(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        tables: Sequence[Table],
+        labels: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        table_prefix, table_mask, _ = self.encode_tables(tables)
+        prompt_embeddings = self.language_model.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([table_prefix, prompt_embeddings], dim=1)
+        combined_mask = torch.cat(
+            [table_mask.to(attention_mask.dtype), attention_mask], dim=1
+        )
+        combined_labels = None
+        if labels is not None:
+            prefix_labels = labels.new_full(table_mask.shape, -100)
+            combined_labels = torch.cat([prefix_labels, labels], dim=1)
+        return inputs_embeds, combined_mask, combined_labels
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        tables: Sequence[Table],
+        labels: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        inputs_embeds, combined_mask, combined_labels = self._decoder_inputs(
+            input_ids, attention_mask, tables, labels
+        )
+        return self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=combined_mask,
+            labels=combined_labels,
+            **kwargs,
+        )
+
+    @torch.no_grad()
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        tables: Sequence[Table],
+        **generation_kwargs: Any,
+    ) -> torch.Tensor:
+        inputs_embeds, combined_mask, _ = self._decoder_inputs(
+            input_ids, attention_mask, tables
+        )
+        generated_tokens = self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=combined_mask,
+            **generation_kwargs,
+        )
+        return torch.cat([input_ids, generated_tokens], dim=1)
+
+
 class SerializedTableQwen(nn.Module):
     def __init__(
         self, language_model: nn.Module, freeze_backbone: bool, lora_enabled: bool
@@ -416,6 +591,8 @@ def build_model(
         model: nn.Module = TableCNNQwen(language_model, tokenizer, config)
     elif config.experiment_type == "continuous_prefix":
         model = ContinuousPrefixQwen(language_model, tokenizer, config)
+    elif config.experiment_type == "structured_2d":
+        model = Structured2DQwen(language_model, tokenizer, config)
     else:
         model = SerializedTableQwen(
             language_model,

@@ -19,6 +19,11 @@ from .utils import (
     trainable_parameter_count,
     write_json,
 )
+from .wtq_evaluation import (
+    OfficialTarget,
+    ensure_official_tagged_data,
+    load_official_targets,
+)
 
 
 def _limit(dataset: Any, maximum: int | None):
@@ -44,6 +49,43 @@ def _training_loader(
     )
 
 
+def _prepare_official_targets(
+    config: ExperimentConfig,
+    output_dir: Path,
+    mirror_output_dir: str | None,
+) -> dict[str, OfficialTarget] | None:
+    if config.evaluation.primary_metric != "denotation_accuracy":
+        return None
+    if config.evaluation.official_data_dir:
+        tagged_data_dir = Path(config.evaluation.official_data_dir)
+    else:
+        if config.evaluation.official_cache_dir:
+            cache_dir = Path(config.evaluation.official_cache_dir)
+        elif mirror_output_dir:
+            cache_dir = (
+                Path(mirror_output_dir).parent
+                / "diagnostics"
+                / "wtq_official_1.0.2"
+            )
+        else:
+            cache_dir = output_dir.parent / "diagnostics" / "wtq_official_1.0.2"
+        tagged_data_dir = ensure_official_tagged_data(cache_dir)
+    print(f"[{output_dir.name}] Loading official WTQ targets from {tagged_data_dir}")
+    targets = load_official_targets(tagged_data_dir)
+    print(f"[{output_dir.name}] Loaded {len(targets)} official WTQ targets")
+    return targets
+
+
+def _set_best_metric(
+    history: dict[str, Any], metric_name: str, best_metric: float | None
+) -> None:
+    history["primary_metric"] = metric_name
+    history["best_metric"] = best_metric
+    history[f"best_{metric_name}"] = best_metric
+    if metric_name == "exact_match":
+        history["best_exact_match"] = best_metric
+
+
 def train_model(
     model: torch.nn.Module,
     tokenizer: Any,
@@ -66,6 +108,10 @@ def train_model(
     validation_dataset = _limit(
         validation_dataset, config.training.max_validation_examples
     )
+    official_targets = _prepare_official_targets(
+        config, output_dir, mirror_output_dir
+    )
+    primary_metric = config.evaluation.primary_metric
     collator = MRCBatchCollator(
         tokenizer=tokenizer,
         experiment_type=config.experiment_type,
@@ -74,6 +120,10 @@ def train_model(
         max_question_tokens=config.data.max_question_tokens,
         max_answer_tokens=config.data.max_answer_tokens,
         training=True,
+        answer_mode=config.data.answer_mode,
+        answer_separator=config.data.answer_separator,
+        table_selection=config.data.table_selection,
+        selection_neighbor_radius=config.data.selection_neighbor_radius,
     )
     parameters = [
         parameter for parameter in model.parameters() if parameter.requires_grad
@@ -96,6 +146,7 @@ def train_model(
         "resume_events": [],
         "status": "running",
         "started_at_unix": time.time(),
+        "primary_metric": primary_metric,
     }
     start_epoch = 0
     start_batch_index = 0
@@ -293,9 +344,10 @@ def train_model(
                 device,
                 predictions_path=validation_dir / "predictions.json",
                 description=f"[{run_name}] Validation epoch {epoch + 1}",
+                official_targets=official_targets,
             )
             epoch_record["validation"] = metrics
-            metric = float(metrics["exact_match"])
+            metric = float(metrics[primary_metric])
             improved = best_metric is None or (
                 metric > best_metric + config.training.early_stopping_min_delta
             )
@@ -304,7 +356,8 @@ def train_model(
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
-            epoch_record["best_exact_match"] = best_metric
+            epoch_record["primary_metric"] = primary_metric
+            epoch_record[f"best_{primary_metric}"] = best_metric
             epoch_record["epochs_without_improvement"] = epochs_without_improvement
             improvement_text = "improved" if improved else "no improvement"
             patience_text = (
@@ -313,7 +366,7 @@ def train_model(
                 else f"{epochs_without_improvement}/{patience}"
             )
             print(
-                f"[{run_name}] Epoch {epoch + 1} validation Exact Match: "
+                f"[{run_name}] Epoch {epoch + 1} validation {primary_metric}: "
                 f"{metric:.4f} | best: {best_metric:.4f} | {improvement_text} | "
                 f"patience: {patience_text}",
                 flush=True,
@@ -338,7 +391,7 @@ def train_model(
         )
         if training_complete:
             history["finished_at_unix"] = time.time()
-            history["best_exact_match"] = best_metric
+            _set_best_metric(history, primary_metric, best_metric)
         if improved:
             save_training_checkpoint(
                 output_dir / "checkpoint_best.pt",
@@ -374,7 +427,7 @@ def train_model(
         if stop_training:
             print(
                 f"[{run_name}] Early stopping after epoch {epoch + 1}: validation "
-                f"Exact Match did not improve for {epochs_without_improvement} "
+                f"{primary_metric} did not improve for {epochs_without_improvement} "
                 "evaluation(s)."
             )
             break
@@ -384,7 +437,7 @@ def train_model(
 
     history["status"] = "early_stopped" if stop_training else "completed"
     history["finished_at_unix"] = time.time()
-    history["best_exact_match"] = best_metric
+    _set_best_metric(history, primary_metric, best_metric)
     write_json(history, output_dir / "history.json")
     if mirror_output_dir:
         mirror_directory(output_dir, mirror_output_dir)

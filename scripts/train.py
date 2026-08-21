@@ -69,6 +69,23 @@ def main() -> None:
             f"targets={','.join(config.lora.target_modules)}",
             flush=True,
         )
+    print(
+        f"TABLE INPUT: selection={config.data.table_selection} | "
+        f"answer_mode={config.data.answer_mode}",
+        flush=True,
+    )
+    if config.experiment_type == "structured_2d":
+        print(
+            f"STRUCTURE:   row={config.structure_2d.use_row_embeddings} | "
+            f"column={config.structure_2d.use_column_embeddings} | "
+            f"cell_type={config.structure_2d.use_cell_type_embeddings} | "
+            f"table_tokens={config.data.max_table_tokens}",
+            flush=True,
+        )
+    print(
+        f"VALIDATION:  primary_metric={config.evaluation.primary_metric}",
+        flush=True,
+    )
     print(f"OUTPUT:     {config.training.output_dir}", flush=True)
     if config.training.mirror_output_dir:
         print(f"DRIVE:      {config.training.mirror_output_dir}", flush=True)
@@ -83,11 +100,15 @@ def main() -> None:
     history = train_model(
         model, tokenizer, dataset["train"], dataset["validation"], config, device
     )
-    best_metric = history.get("best_exact_match")
+    primary_metric = history.get("primary_metric", config.evaluation.primary_metric)
+    best_metric = history.get("best_metric", history.get("best_exact_match"))
     best_text = "n/a" if best_metric is None else f"{best_metric:.4f}"
     print(f"\n{separator}", flush=True)
     print(f"EXPERIMENT FINISHED: {run_name}", flush=True)
-    print(f"STATUS: {history.get('status', 'unknown')} | BEST EXACT MATCH: {best_text}")
+    print(
+        f"STATUS: {history.get('status', 'unknown')} | "
+        f"BEST {str(primary_metric).upper()}: {best_text}"
+    )
     print(f"{separator}\n", flush=True)
 
 

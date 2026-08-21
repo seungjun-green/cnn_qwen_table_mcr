@@ -18,7 +18,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .data import Table, normalize_table, truncate_table
+from .data import (
+    Table,
+    normalize_table,
+    select_table_for_question,
+    truncate_table,
+)
 
 WTQ_COMPACT_URL = (
     "https://github.com/ppasupat/WikiTableQuestions/releases/download/"
@@ -260,6 +265,8 @@ def truncation_coverage(
     max_rows: int,
     max_cols: int,
     sample_limit: int = 10,
+    table_selection: str = "leading",
+    selection_neighbor_radius: int = 1,
 ) -> dict[str, Any]:
     total = full_covered = truncated_covered = removed = multi_answer = 0
     removed_samples: list[dict[str, Any]] = []
@@ -269,7 +276,16 @@ def truncation_coverage(
         if target is None:
             raise KeyError(f"Official target not found for example {example_id!r}")
         table = normalize_table(example["table"])
-        shortened = truncate_table(table, max_rows, max_cols)
+        if table_selection == "question_relevance":
+            shortened = select_table_for_question(
+                table,
+                str(example["question"]),
+                max_rows,
+                max_cols,
+                selection_neighbor_radius,
+            )
+        else:
+            shortened = truncate_table(table, max_rows, max_cols)
         full_has_answer = target_is_directly_covered(target, table)
         truncated_has_answer = target_is_directly_covered(target, shortened)
         total += 1
@@ -293,6 +309,7 @@ def truncation_coverage(
     denominator = max(total, 1)
     return {
         "number_evaluated": total,
+        "table_selection": table_selection,
         "multi_answer_count": multi_answer,
         "multi_answer_rate": multi_answer / denominator,
         "full_table_direct_coverage_count": full_covered,
@@ -306,6 +323,7 @@ def truncation_coverage(
         "removed_samples": removed_samples,
         "note": (
             "Direct coverage checks normalized string/number/date matches in table "
-            "cells. Computed answers may correctly be absent from the full table."
+            "cells. Computed answers may correctly be absent from the full table. "
+            f"Selection mode: {table_selection}."
         ),
     }

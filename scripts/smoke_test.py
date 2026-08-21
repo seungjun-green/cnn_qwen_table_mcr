@@ -17,7 +17,13 @@ sys.path.insert(0, str(ROOT))
 
 from src.config import load_config
 from src.data import MRCBatchCollator, load_wtq, normalize_table
-from src.model import ContinuousPrefixQwen, TableCNNQwen, build_model, load_tokenizer
+from src.model import (
+    ContinuousPrefixQwen,
+    Structured2DQwen,
+    TableCNNQwen,
+    build_model,
+    load_tokenizer,
+)
 from src.utils import gradient_norm, model_dtype, select_device, set_seed
 
 
@@ -44,10 +50,10 @@ def assert_gradient(name: str, module: torch.nn.Module) -> float:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    supported_types = {"cnn", "continuous_prefix"}
+    supported_types = {"cnn", "continuous_prefix", "serialized", "structured_2d"}
     if config.experiment_type not in supported_types:
         raise ValueError(
-            "The smoke test requires experiment_type: cnn or continuous_prefix"
+            "Unsupported experiment type for the smoke test"
         )
     set_seed(config.training.seed)
     device = select_device()
@@ -64,8 +70,6 @@ def main() -> None:
     print(f"Original table shape (including header): {table.shape}")
 
     model = build_model(config, tokenizer, device, dtype)
-    if not isinstance(model, (TableCNNQwen, ContinuousPrefixQwen)):
-        raise TypeError("Expected a CNN table model")
     collator = MRCBatchCollator(
         tokenizer,
         experiment_type=config.experiment_type,
@@ -74,21 +78,29 @@ def main() -> None:
         max_question_tokens=config.data.max_question_tokens,
         max_answer_tokens=config.data.max_answer_tokens,
         training=True,
+        answer_mode=config.data.answer_mode,
+        answer_separator=config.data.answer_separator,
+        table_selection=config.data.table_selection,
+        selection_neighbor_radius=config.data.selection_neighbor_radius,
     )
     batch = collator([example])
     input_ids = batch["input_ids"].to(device)
     attention_mask = batch["attention_mask"].to(device)
     labels = batch["labels"].to(device)
     model.train()
-    memory, memory_mask, shapes = model.encode_tables(batch["tables"])
-    print(f"After cell MLP: {shapes['cell_grid']}")
-    print(f"After 2D CNN: {shapes['cnn_output']}")
-    print(f"Flattened CNN memory: {shapes['flattened_cnn']}")
-    print(f"Projected table memory: {shapes['table_memory']}")
-    if "table_prefix" in shapes:
-        print(f"Compacted table prefix: {shapes['table_prefix']}")
-    print(f"Valid table cells: {int(memory_mask.sum())}")
-    del memory
+    if isinstance(model, (TableCNNQwen, ContinuousPrefixQwen, Structured2DQwen)):
+        memory, memory_mask, shapes = model.encode_tables(batch["tables"])
+        if "cell_grid" in shapes:
+            print(f"After cell MLP: {shapes['cell_grid']}")
+            print(f"After 2D CNN: {shapes['cnn_output']}")
+            print(f"Flattened CNN memory: {shapes['flattened_cnn']}")
+            print(f"Projected table memory: {shapes['table_memory']}")
+        if "table_tokens" in shapes:
+            print(f"Structured table tokens: {shapes['table_tokens']}")
+        if "table_prefix" in shapes:
+            print(f"Table prefix: {shapes['table_prefix']}")
+        print(f"Valid table positions: {int(memory_mask.sum())}")
+        del memory
 
     outputs = model(
         input_ids=input_ids,
@@ -102,9 +114,14 @@ def main() -> None:
         raise AssertionError(f"Loss is not finite: {loss}")
     print(f"Loss: {float(loss.detach().float()):.8f}")
     loss.backward()
-    assert_gradient("cell encoder", model.cell_encoder)
-    assert_gradient("CNN", model.table_cnn)
-    assert_gradient("projector", model.projector)
+    if isinstance(model, (TableCNNQwen, ContinuousPrefixQwen)):
+        assert_gradient("cell encoder", model.cell_encoder)
+        assert_gradient("CNN", model.table_cnn)
+        assert_gradient("projector", model.projector)
+    if isinstance(model, Structured2DQwen):
+        assert_gradient("row embeddings", model.row_embeddings)
+        assert_gradient("column embeddings", model.column_embeddings)
+        assert_gradient("cell type embeddings", model.cell_type_embeddings)
     if config.lora.enabled:
         assert_gradient("LoRA adapters", model.language_model)
     if isinstance(model, TableCNNQwen):
@@ -119,6 +136,10 @@ def main() -> None:
         max_question_tokens=config.data.max_question_tokens,
         max_answer_tokens=config.data.max_answer_tokens,
         training=False,
+        answer_mode=config.data.answer_mode,
+        answer_separator=config.data.answer_separator,
+        table_selection=config.data.table_selection,
+        selection_neighbor_radius=config.data.selection_neighbor_radius,
     )
     generation_batch = eval_collator([example])
     generation_input = generation_batch["input_ids"].to(device)

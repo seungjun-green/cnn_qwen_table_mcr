@@ -17,6 +17,7 @@ from src.data import load_wtq
 from src.evaluate import evaluate_model
 from src.model import build_model, load_tokenizer, load_trainable_checkpoint
 from src.utils import mirror_directory, model_dtype, select_device, set_seed
+from src.wtq_evaluation import ensure_official_tagged_data, load_official_targets
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +50,17 @@ def main() -> None:
     model = build_model(config, tokenizer, device, dtype)
     load_trainable_checkpoint(model, args.checkpoint)
     output_dir = Path(args.output_dir or config.training.output_dir) / args.split
+    official_targets = None
+    if config.evaluation.primary_metric == "denotation_accuracy":
+        if config.evaluation.official_data_dir:
+            tagged_data_dir = Path(config.evaluation.official_data_dir)
+        else:
+            cache_dir = Path(
+                config.evaluation.official_cache_dir
+                or output_dir.parent / "diagnostics" / "wtq_official_1.0.2"
+            )
+            tagged_data_dir = ensure_official_tagged_data(cache_dir)
+        official_targets = load_official_targets(tagged_data_dir)
     run_name = Path(config.training.output_dir).name or "experiment"
     metrics, _ = evaluate_model(
         model,
@@ -58,6 +70,7 @@ def main() -> None:
         device,
         predictions_path=output_dir / "predictions.json",
         description=f"[{run_name}] {args.split} evaluation",
+        official_targets=official_targets,
     )
     if config.training.mirror_output_dir:
         mirror_directory(

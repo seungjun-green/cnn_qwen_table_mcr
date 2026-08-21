@@ -24,6 +24,11 @@ class DataConfig:
     max_question_tokens: int = 256
     max_answer_tokens: int = 64
     num_workers: int = 0
+    max_table_tokens: int = 2048
+    answer_mode: str = "first"
+    answer_separator: str = " | "
+    table_selection: str = "leading"
+    selection_neighbor_radius: int = 1
 
 
 @dataclass
@@ -60,6 +65,22 @@ class LoRAConfig:
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
     )
     bias: str = "none"
+
+
+@dataclass
+class Structure2DConfig:
+    dropout: float = 0.05
+    initial_scale: float = 0.1
+    use_row_embeddings: bool = True
+    use_column_embeddings: bool = True
+    use_cell_type_embeddings: bool = True
+
+
+@dataclass
+class EvaluationConfig:
+    primary_metric: str = "exact_match"
+    official_data_dir: str | None = None
+    official_cache_dir: str | None = None
 
 
 @dataclass
@@ -100,6 +121,8 @@ class ExperimentConfig:
     cnn: CNNConfig = field(default_factory=CNNConfig)
     cross_attention: CrossAttentionConfig = field(default_factory=CrossAttentionConfig)
     lora: LoRAConfig = field(default_factory=LoRAConfig)
+    structure_2d: Structure2DConfig = field(default_factory=Structure2DConfig)
+    evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
 
@@ -107,7 +130,12 @@ class ExperimentConfig:
         return asdict(self)
 
     def validate(self) -> None:
-        supported_experiments = {"cnn", "continuous_prefix", "serialized"}
+        supported_experiments = {
+            "cnn",
+            "continuous_prefix",
+            "serialized",
+            "structured_2d",
+        }
         if self.experiment_type not in supported_experiments:
             choices = ", ".join(sorted(supported_experiments))
             raise ValueError(f"experiment_type must be one of: {choices}")
@@ -123,6 +151,16 @@ class ExperimentConfig:
             raise ValueError("cnn.kernel_size must be 3 or 5")
         if self.data.max_rows < 1 or self.data.max_cols < 1:
             raise ValueError("max_rows and max_cols must be positive")
+        if self.data.max_table_tokens < 1:
+            raise ValueError("max_table_tokens must be positive")
+        if self.data.answer_mode not in {"first", "all"}:
+            raise ValueError("answer_mode must be first or all")
+        if not self.data.answer_separator:
+            raise ValueError("answer_separator cannot be empty")
+        if self.data.table_selection not in {"leading", "question_relevance"}:
+            raise ValueError("table_selection must be leading or question_relevance")
+        if self.data.selection_neighbor_radius < 0:
+            raise ValueError("selection_neighbor_radius cannot be negative")
         if not 0 <= self.cross_attention.gate_init < 1:
             raise ValueError("gate_init must be in [0, 1)")
         if self.lora.rank < 1:
@@ -139,6 +177,18 @@ class ExperimentConfig:
             raise ValueError("lora.bias must be none, all, or lora_only")
         if self.lora.enabled and not self.model.freeze_backbone:
             raise ValueError("LoRA requires model.freeze_backbone: true")
+        if not 0 <= self.structure_2d.dropout < 1:
+            raise ValueError("structure_2d.dropout must be in [0, 1)")
+        if self.structure_2d.initial_scale < 0:
+            raise ValueError("structure_2d.initial_scale cannot be negative")
+        if self.evaluation.primary_metric not in {
+            "exact_match",
+            "denotation_accuracy",
+        }:
+            raise ValueError(
+                "evaluation.primary_metric must be exact_match or "
+                "denotation_accuracy"
+            )
         if self.training.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be positive")
         if self.training.log_every < 1:
@@ -161,6 +211,8 @@ _SECTIONS: dict[str, type[Any]] = {
     "cnn": CNNConfig,
     "cross_attention": CrossAttentionConfig,
     "lora": LoRAConfig,
+    "structure_2d": Structure2DConfig,
+    "evaluation": EvaluationConfig,
     "training": TrainingConfig,
     "generation": GenerationConfig,
 }

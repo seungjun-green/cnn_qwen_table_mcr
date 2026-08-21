@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import re
 from typing import Any
 
 import torch
@@ -16,6 +17,11 @@ SERIALIZED_SYSTEM_PROMPT = (
 CONTINUOUS_PREFIX_SYSTEM_PROMPT = (
     "A learned representation of the table precedes this conversation. "
     "Answer the user's question using that table. Return only the final answer."
+)
+STRUCTURED_2D_SYSTEM_PROMPT = (
+    "A tokenized table with learned row, column, and cell-type structure precedes "
+    "this conversation. Answer the user's question using that table. Return only "
+    "the final answer; separate multiple answer items with |."
 )
 
 
@@ -56,6 +62,125 @@ def truncate_table(table: Table, max_rows: int, max_cols: int) -> Table:
     return Table(
         header=table.header[:columns],
         rows=[row[:columns] for row in table.rows[:data_rows]],
+    )
+
+
+def _terms(text: str) -> set[str]:
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "are",
+        "at",
+        "by",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "was",
+        "were",
+        "what",
+        "which",
+        "who",
+        "with",
+    }
+    return {
+        token
+        for token in re.findall(r"[\w]+", str(text).casefold(), flags=re.UNICODE)
+        if token and token not in stopwords
+    }
+
+
+def _is_question_mention(
+    value: str, question_text: str, question_terms: set[str]
+) -> bool:
+    normalized = str(value).strip().casefold()
+    if not normalized:
+        return False
+    if len(normalized) < 3 and normalized not in question_terms:
+        return False
+    return normalized in question_text
+
+
+def select_table_for_question(
+    table: Table,
+    question: str,
+    max_rows: int,
+    max_cols: int,
+    neighbor_radius: int = 1,
+) -> Table:
+    """Select relevant columns and rows, retaining neighbors for relational QA."""
+    if max_rows < 1 or max_cols < 1:
+        raise ValueError("max_rows and max_cols must be positive")
+    question_terms = _terms(question)
+    question_text = str(question).casefold()
+
+    column_scores: list[tuple[float, int]] = []
+    for column_index, header in enumerate(table.header):
+        header_overlap = len(_terms(header) & question_terms)
+        value_overlap = 0
+        exact_mentions = 0
+        for row in table.rows:
+            if column_index >= len(row):
+                continue
+            value = row[column_index]
+            value_overlap += len(_terms(value) & question_terms)
+            if _is_question_mention(value, question_text, question_terms):
+                exact_mentions += 1
+        score = 8.0 * header_overlap + 2.0 * exact_mentions + value_overlap
+        column_scores.append((score, column_index))
+    ranked_columns = sorted(column_scores, key=lambda item: (-item[0], item[1]))
+    selected_columns = sorted(
+        index for _, index in ranked_columns[: min(max_cols, len(table.header))]
+    )
+
+    row_capacity = max(max_rows - 1, 0)
+    row_scores: list[tuple[float, int]] = []
+    for row_index, row in enumerate(table.rows):
+        row_text = " ".join(row)
+        overlap = len(_terms(row_text) & question_terms)
+        exact_mentions = sum(
+            1
+            for value in row
+            if _is_question_mention(value, question_text, question_terms)
+        )
+        row_scores.append((3.0 * exact_mentions + overlap, row_index))
+    ranked_rows = sorted(row_scores, key=lambda item: (-item[0], item[1]))
+
+    selected_row_set: set[int] = set()
+    if row_capacity:
+        for _, anchor in ranked_rows:
+            offsets = [0]
+            for distance in range(1, neighbor_radius + 1):
+                offsets.extend([distance, -distance])
+            for offset in offsets:
+                candidate = anchor + offset
+                if 0 <= candidate < len(table.rows):
+                    selected_row_set.add(candidate)
+                    if len(selected_row_set) >= row_capacity:
+                        break
+            if len(selected_row_set) >= row_capacity:
+                break
+        if len(selected_row_set) < row_capacity:
+            for row_index in range(len(table.rows)):
+                selected_row_set.add(row_index)
+                if len(selected_row_set) >= row_capacity:
+                    break
+    selected_rows = sorted(selected_row_set)
+    return Table(
+        header=[table.header[index] for index in selected_columns],
+        rows=[
+            [table.rows[row_index][column_index] for column_index in selected_columns]
+            for row_index in selected_rows
+        ],
     )
 
 
@@ -120,6 +245,13 @@ def build_prompt_ids(
             CONTINUOUS_PREFIX_SYSTEM_PROMPT,
             enable_thinking=enable_thinking,
         )
+    if experiment_type == "structured_2d":
+        return _prompt_ids(
+            tokenizer,
+            question,
+            STRUCTURED_2D_SYSTEM_PROMPT,
+            enable_thinking=enable_thinking,
+        )
     return _prompt_ids(
         tokenizer,
         question,
@@ -135,6 +267,18 @@ def extract_answers(example: dict[str, Any]) -> list[str]:
     return [str(answer) for answer in answers]
 
 
+def serialize_answers(
+    answers: Sequence[str], mode: str = "first", separator: str = " | "
+) -> str:
+    if not answers:
+        return ""
+    if mode == "first":
+        return str(answers[0])
+    if mode == "all":
+        return separator.join(str(answer) for answer in answers)
+    raise ValueError(f"Unsupported answer mode: {mode}")
+
+
 class MRCBatchCollator:
     def __init__(
         self,
@@ -146,6 +290,10 @@ class MRCBatchCollator:
         max_answer_tokens: int,
         training: bool,
         enable_thinking: bool | None = None,
+        answer_mode: str = "first",
+        answer_separator: str = " | ",
+        table_selection: str = "leading",
+        selection_neighbor_radius: int = 1,
     ) -> None:
         self.tokenizer = tokenizer
         self.experiment_type = experiment_type
@@ -154,9 +302,14 @@ class MRCBatchCollator:
         self.max_question_tokens = max_question_tokens
         self.max_answer_tokens = max_answer_tokens
         self.training = training
+        self.answer_mode = answer_mode
+        self.answer_separator = answer_separator
+        self.table_selection = table_selection
+        self.selection_neighbor_radius = selection_neighbor_radius
         self.enable_thinking = (
             False
-            if experiment_type == "continuous_prefix" and enable_thinking is None
+            if experiment_type in {"continuous_prefix", "serialized", "structured_2d"}
+            and enable_thinking is None
             else enable_thinking
         )
 
@@ -168,13 +321,24 @@ class MRCBatchCollator:
         example_ids: list[str] = []
         gold_answers: list[list[str]] = []
         original_shapes: list[tuple[int, int]] = []
+        selected_shapes: list[tuple[int, int]] = []
         eos_id = self.tokenizer.eos_token_id
         if eos_id is None:
             raise ValueError("Tokenizer must define eos_token_id")
 
         for example in examples:
             question = str(example["question"])
-            table = normalize_table(example["table"])
+            original_table = normalize_table(example["table"])
+            if self.table_selection == "question_relevance":
+                table = select_table_for_question(
+                    original_table,
+                    question,
+                    self.max_rows,
+                    self.max_cols,
+                    self.selection_neighbor_radius,
+                )
+            else:
+                table = truncate_table(original_table, self.max_rows, self.max_cols)
             answers = extract_answers(example)
             if self.training and not answers:
                 raise ValueError("Training example has no answer")
@@ -188,8 +352,11 @@ class MRCBatchCollator:
                 self.enable_thinking,
             )[-self.max_question_tokens :]
             if self.training:
+                answer_text = serialize_answers(
+                    answers, self.answer_mode, self.answer_separator
+                )
                 answer_ids = list(
-                    self.tokenizer.encode(answers[0], add_special_tokens=False)
+                    self.tokenizer.encode(answer_text, add_special_tokens=False)
                 )[: self.max_answer_tokens]
                 sequence = prompt + answer_ids + [eos_id]
                 label = [-100] * len(prompt) + answer_ids + [eos_id]
@@ -198,11 +365,12 @@ class MRCBatchCollator:
                 label = [-100] * len(prompt)
             sequences.append(sequence)
             labels.append(label)
-            tables.append(truncate_table(table, self.max_rows, self.max_cols))
+            tables.append(table)
             questions.append(question)
             example_ids.append(str(example.get("id", "")))
             gold_answers.append(answers)
-            original_shapes.append(table.shape)
+            original_shapes.append(original_table.shape)
+            selected_shapes.append(table.shape)
 
         pad_id = self.tokenizer.pad_token_id
         if pad_id is None:
@@ -227,4 +395,5 @@ class MRCBatchCollator:
             "example_ids": example_ids,
             "gold_answers": gold_answers,
             "original_shapes": original_shapes,
+            "selected_shapes": selected_shapes,
         }

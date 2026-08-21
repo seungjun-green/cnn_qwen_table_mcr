@@ -17,10 +17,31 @@ CHECKPOINT_VERSION = 1
 
 def architecture_signature(config: ExperimentConfig) -> str:
     config_dict = config.to_dict()
+    legacy_data_keys = (
+        "dataset",
+        "revision",
+        "max_rows",
+        "max_cols",
+        "max_cell_tokens",
+        "max_question_tokens",
+        "max_answer_tokens",
+        "num_workers",
+    )
+    data_signature = {key: config_dict["data"][key] for key in legacy_data_keys}
+    if config.data.answer_mode != "first":
+        data_signature["answer_mode"] = config.data.answer_mode
+        data_signature["answer_separator"] = config.data.answer_separator
+    if config.data.table_selection != "leading":
+        data_signature["table_selection"] = config.data.table_selection
+        data_signature["selection_neighbor_radius"] = (
+            config.data.selection_neighbor_radius
+        )
+    if config.experiment_type == "structured_2d":
+        data_signature["max_table_tokens"] = config.data.max_table_tokens
     relevant = {
         "experiment_type": config_dict["experiment_type"],
         "model": config_dict["model"],
-        "data": config_dict["data"],
+        "data": data_signature,
         "cell_encoder": config_dict["cell_encoder"],
         "cnn": config_dict["cnn"],
         "cross_attention": config_dict["cross_attention"],
@@ -40,6 +61,10 @@ def architecture_signature(config: ExperimentConfig) -> str:
     }
     if config.lora.enabled:
         relevant["lora"] = config_dict["lora"]
+    if config.experiment_type == "structured_2d":
+        relevant["structure_2d"] = config_dict["structure_2d"]
+    if config.evaluation.primary_metric != "exact_match":
+        relevant["primary_metric"] = config.evaluation.primary_metric
     payload = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
