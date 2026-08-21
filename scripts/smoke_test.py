@@ -54,6 +54,17 @@ def assert_gradient(name: str, module: torch.nn.Module) -> float:
     return norm
 
 
+def assert_parameter_gradient(name: str, parameter: torch.nn.Parameter) -> float:
+    gradient = parameter.grad
+    norm = 0.0 if gradient is None else float(gradient.detach().float().norm().item())
+    if not math.isfinite(norm) or norm <= 0:
+        raise AssertionError(
+            f"Expected a finite non-zero gradient for {name}, got {norm}"
+        )
+    print(f"{name} gradient norm: {norm:.8f}")
+    return norm
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -167,7 +178,7 @@ def main() -> None:
     loss.backward()
     if isinstance(model, SerializedCNNResidualQwen):
         if float(torch.tanh(model.residual_gate).detach().float()) == 0.0:
-            assert_gradient("CNN residual gate", model.residual_gate)
+            assert_parameter_gradient("CNN residual gate", model.residual_gate)
         else:
             assert_gradient("cell encoder", model.cell_encoder)
             assert_gradient("CNN", model.table_cnn)
