@@ -425,10 +425,10 @@ def build_model(
     return model.to(device=device, dtype=dtype)
 
 
-def load_trainable_checkpoint(model: nn.Module, path: str | Path) -> None:
+def load_trainable_checkpoint(model: nn.Module, path: str | Path) -> dict[str, Any]:
     from .checkpointing import load_trainable_state_dict
 
-    state = torch.load(path, map_location="cpu", weights_only=False)
-    if "model_state" in state:
-        state = state["model_state"]
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    state = checkpoint.get("model_state", checkpoint)
     load_trainable_state_dict(model, state)
+    return checkpoint if "model_state" in checkpoint else {}

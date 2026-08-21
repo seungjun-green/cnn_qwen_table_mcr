@@ -23,6 +23,15 @@ from src.model import ContinuousPrefixQwen, TableCNNQwen, build_model
 from src.pooling import TokenPooler
 from src.train import train_model
 from src.utils import mirror_directory
+from src.wtq_evaluation import (
+    OfficialTarget,
+    check_denotation,
+    normalize_wtq_string,
+    score_prediction,
+    split_prediction_items,
+    to_wtq_values,
+    truncation_coverage,
+)
 
 
 class DummyTokenizer:
@@ -276,6 +285,51 @@ class ComponentTests(unittest.TestCase):
         metrics = table_dependence_metrics(correct_records, shuffled_records)
         self.assertEqual(metrics["exact_match_drop"], 0.5)
         self.assertEqual(metrics["prediction_change_rate"], 0.5)
+
+    def test_official_denotation_scoring_uses_complete_answer_sets(self):
+        target = OfficialTarget(
+            original_strings=("Café [1]", "2"),
+            canonical_strings=("Café [1]", "2.0"),
+            values=to_wtq_values(("Café [1]", "2"), ("Café [1]", "2.0")),
+        )
+        self.assertEqual(normalize_wtq_string('"Café [1]."'), "cafe [1]")
+        self.assertTrue(score_prediction("2.0 | cafe", target))
+        self.assertFalse(score_prediction("cafe", target))
+        self.assertTrue(
+            check_denotation(to_wtq_values(["1"]), to_wtq_values(["1.0"]))
+        )
+        self.assertEqual(split_prediction_items("New York, NY; Boston"), [
+            "New York, NY",
+            "Boston",
+        ])
+
+    def test_truncation_audit_only_counts_answers_removed_by_truncation(self):
+        targets = {
+            "kept-out": OfficialTarget(
+                ("answer",), ("answer",), to_wtq_values(["answer"])
+            ),
+            "computed": OfficialTarget(("3",), ("3",), to_wtq_values(["3"])),
+        }
+        examples = [
+            {
+                "id": "kept-out",
+                "question": "what is last?",
+                "table": {
+                    "header": ["name", "value"],
+                    "rows": [["first", "x"], ["last", "answer"]],
+                },
+            },
+            {
+                "id": "computed",
+                "question": "how many?",
+                "table": {"header": ["name"], "rows": [["a"], ["b"]]},
+            },
+        ]
+        audit = truncation_coverage(examples, targets, max_rows=2, max_cols=2)
+        self.assertEqual(audit["number_evaluated"], 2)
+        self.assertEqual(audit["full_table_direct_coverage_count"], 1)
+        self.assertEqual(audit["truncation_removed_direct_answer_count"], 1)
+        self.assertEqual(audit["removed_samples"][0]["id"], "kept-out")
 
     def test_full_checkpoint_restores_model_optimizer_and_progress(self):
         config = ExperimentConfig()

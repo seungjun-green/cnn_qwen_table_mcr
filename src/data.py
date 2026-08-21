@@ -165,6 +165,7 @@ class MRCBatchCollator:
         labels: list[list[int]] = []
         tables: list[Table] = []
         questions: list[str] = []
+        example_ids: list[str] = []
         gold_answers: list[list[str]] = []
         original_shapes: list[tuple[int, int]] = []
         eos_id = self.tokenizer.eos_token_id
@@ -199,6 +200,7 @@ class MRCBatchCollator:
             labels.append(label)
             tables.append(truncate_table(table, self.max_rows, self.max_cols))
             questions.append(question)
+            example_ids.append(str(example.get("id", "")))
             gold_answers.append(answers)
             original_shapes.append(table.shape)
 
@@ -222,6 +224,7 @@ class MRCBatchCollator:
             "labels": label_tensor,
             "tables": tables,
             "questions": questions,
+            "example_ids": example_ids,
             "gold_answers": gold_answers,
             "original_shapes": original_shapes,
         }

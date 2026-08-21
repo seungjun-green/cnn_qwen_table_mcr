@@ -57,7 +57,8 @@ def evaluate_model(
         )
         new_tokens = generated[:, input_ids.shape[1] :]
         predictions = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
-        for question, prediction, golds, shape in zip(
+        for example_id, question, prediction, golds, shape in zip(
+            batch["example_ids"],
             batch["questions"],
             predictions,
             batch["gold_answers"],
@@ -68,6 +69,7 @@ def evaluate_model(
             correct += int(is_correct)
             records.append(
                 {
+                    "id": example_id,
                     "question": question,
                     "prediction": prediction,
                     "gold_answers": golds,

@@ -329,6 +329,35 @@ diagnostic prompt-mismatch test rather than a fair retrained result. A clean
 non-thinking experiment still requires training a new checkpoint with
 `enable_thinking=False` used consistently for training and evaluation.
 
+## Audit the best continuous-prefix LoRA checkpoint
+
+Open `notebooks/checkpoint_audit_colab.ipynb` to audit the saved LoRA model without
+retraining. It loads `checkpoint_best.pt` from Drive (the epoch-3 checkpoint for the
+reported run), evaluates correct and shuffled tables, prints representative
+predictions, computes complete-denotation accuracy with the official WTQ 1.0.2
+normalization rules, and measures whether the configured 32×8 crop removes answers
+that were directly present in the full table.
+
+The same audit can be launched directly in Colab:
+
+```bash
+python scripts/audit_saved_checkpoint.py \
+  --config configs/continuous_prefix_lora.yaml \
+  --run-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/continuous_prefix_lora \
+  --checkpoint best \
+  --max-examples 200
+```
+
+Generation defaults to 200 validation examples while direct truncation coverage is
+computed over the full validation split. Use `--max-examples 2831` for full-split
+generation. The official tagged answer metadata is downloaded once and cached under
+the Drive diagnostics directory. Audit artifacts are saved under
+`continuous_prefix_lora/diagnostics/checkpoint_audit/`.
+
+The checkpoint was trained only against `answers[0]`, so this audit diagnoses the
+existing model; it does not retroactively fix its target objective. Retraining with
+all denotation items should be done only after reviewing these results.
+
 ## Local tests
 
 The component suite requires no model or dataset download:
