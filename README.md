@@ -217,6 +217,41 @@ python scripts/run_sweep.py \
   --mirror-root /content/drive/MyDrive/cnn_qwen_table_mcr/outputs
 ```
 
+## Diagnose whether saved models use their tables
+
+The first six sweep checkpoints can be tested directly from Drive without retraining:
+
+```bash
+python scripts/diagnose_saved_runs.py \
+  --mirror-root /content/drive/MyDrive/cnn_qwen_table_mcr/outputs \
+  --max-examples 200
+```
+
+For each checkpoint, this evaluates the same validation questions four ways:
+
+- original Qwen3 prompt with correct tables;
+- original Qwen3 prompt with shuffled tables;
+- `enable_thinking=False` with correct tables;
+- `enable_thinking=False` with shuffled tables.
+
+It reports correct-table Exact Match, shuffled-table Exact Match, their difference,
+and the fraction of predictions that change after table replacement. It also prints
+sample predictions and saves all records under:
+
+```text
+/content/drive/MyDrive/cnn_qwen_table_mcr/outputs/diagnostics/table_dependence/
+```
+
+A meaningful Exact Match drop or prediction-change rate indicates that the model is
+using table information. If both are nearly zero, it is likely relying mostly on
+question/answer priors. The `no_thinking` comparison shows whether Qwen3's default
+thinking prompt is interfering with short-answer evaluation.
+
+Because these checkpoints were trained with the original prompt, `no_thinking` is a
+diagnostic prompt-mismatch test rather than a fair retrained result. A clean
+non-thinking experiment still requires training a new checkpoint with
+`enable_thinking=False` used consistently for training and evaluation.
+
 ## Local tests
 
 The component suite requires no model or dataset download:

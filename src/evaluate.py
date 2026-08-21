@@ -21,6 +21,7 @@ def evaluate_model(
     device: torch.device,
     predictions_path: str | Path | None = None,
     description: str = "Evaluating",
+    enable_thinking: bool | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     collator = MRCBatchCollator(
         tokenizer=tokenizer,
@@ -30,6 +31,7 @@ def evaluate_model(
         max_question_tokens=config.data.max_question_tokens,
         max_answer_tokens=config.data.max_answer_tokens,
         training=False,
+        enable_thinking=enable_thinking,
     )
     loader = DataLoader(
         dataset,

@@ -68,15 +68,24 @@ def load_wtq(dataset_name: str, revision: str):
     return load_dataset(dataset_name, revision=revision)
 
 
-def _prompt_ids(tokenizer: Any, question: str, system_prompt: str) -> list[int]:
+def _prompt_ids(
+    tokenizer: Any,
+    question: str,
+    system_prompt: str,
+    enable_thinking: bool | None = None,
+) -> list[int]:
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": str(question)},
     ]
     if getattr(tokenizer, "chat_template", None):
-        ids = tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True
-        )
+        template_kwargs = {
+            "tokenize": True,
+            "add_generation_prompt": True,
+        }
+        if enable_thinking is not None:
+            template_kwargs["enable_thinking"] = enable_thinking
+        ids = tokenizer.apply_chat_template(messages, **template_kwargs)
         return list(ids)
     prompt = f"System: {system_prompt}\nUser: {question}\nAssistant:"
     return list(tokenizer.encode(prompt, add_special_tokens=True))
@@ -89,12 +98,23 @@ def build_prompt_ids(
     experiment_type: str = "cnn",
     max_rows: int = 32,
     max_cols: int = 8,
+    enable_thinking: bool | None = None,
 ) -> list[int]:
     if experiment_type == "serialized":
         text_table = serialize_table(table, max_rows, max_cols)
         question = f"Table:\n{text_table}\n\nQuestion: {question}"
-        return _prompt_ids(tokenizer, question, SERIALIZED_SYSTEM_PROMPT)
-    return _prompt_ids(tokenizer, question, SYSTEM_PROMPT)
+        return _prompt_ids(
+            tokenizer,
+            question,
+            SERIALIZED_SYSTEM_PROMPT,
+            enable_thinking=enable_thinking,
+        )
+    return _prompt_ids(
+        tokenizer,
+        question,
+        SYSTEM_PROMPT,
+        enable_thinking=enable_thinking,
+    )
 
 
 def extract_answers(example: dict[str, Any]) -> list[str]:
@@ -114,6 +134,7 @@ class MRCBatchCollator:
         max_question_tokens: int,
         max_answer_tokens: int,
         training: bool,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.experiment_type = experiment_type
@@ -122,6 +143,7 @@ class MRCBatchCollator:
         self.max_question_tokens = max_question_tokens
         self.max_answer_tokens = max_answer_tokens
         self.training = training
+        self.enable_thinking = enable_thinking
 
     def __call__(self, examples: Sequence[dict[str, Any]]) -> dict[str, Any]:
         sequences: list[list[int]] = []
@@ -147,6 +169,7 @@ class MRCBatchCollator:
                 self.experiment_type,
                 self.max_rows,
                 self.max_cols,
+                self.enable_thinking,
             )[-self.max_question_tokens :]
             if self.training:
                 answer_ids = list(

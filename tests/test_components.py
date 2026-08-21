@@ -12,7 +12,8 @@ from torch.nn import functional as F
 
 from src.checkpointing import load_training_checkpoint, save_training_checkpoint
 from src.config import ExperimentConfig, load_config
-from src.data import MRCBatchCollator, Table, truncate_table
+from src.data import MRCBatchCollator, Table, build_prompt_ids, truncate_table
+from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
 from src.model import TableCNNQwen
 from src.pooling import TokenPooler
 from src.train import train_model
@@ -102,6 +103,46 @@ class DummyLM(nn.Module):
 
 
 class ComponentTests(unittest.TestCase):
+    def test_prompt_can_explicitly_disable_qwen_thinking(self):
+        class ChatTokenizer(DummyTokenizer):
+            chat_template = "template"
+            observed_enable_thinking = None
+
+            def apply_chat_template(self, messages, **kwargs):
+                del messages
+                self.observed_enable_thinking = kwargs.get("enable_thinking")
+                return [7, 8]
+
+        tokenizer = ChatTokenizer()
+        prompt = build_prompt_ids(tokenizer, "question", enable_thinking=False)
+        self.assertEqual(prompt, [7, 8])
+        self.assertFalse(tokenizer.observed_enable_thinking)
+
+    def test_table_shuffling_and_dependence_metrics(self):
+        examples = [
+            {
+                "question": f"q{index}",
+                "answers": [str(index)],
+                "table": {"header": ["h"], "rows": [[str(index)]]},
+            }
+            for index in range(4)
+        ]
+        shuffled = build_table_shuffled_examples(examples)
+        for original, replacement in zip(examples, shuffled):
+            self.assertEqual(original["question"], replacement["question"])
+            self.assertNotEqual(original["table"], replacement["table"])
+        correct_records = [
+            {"prediction": "yes", "correct": True},
+            {"prediction": "no", "correct": False},
+        ]
+        shuffled_records = [
+            {"prediction": "no", "correct": False},
+            {"prediction": "no", "correct": False},
+        ]
+        metrics = table_dependence_metrics(correct_records, shuffled_records)
+        self.assertEqual(metrics["exact_match_drop"], 0.5)
+        self.assertEqual(metrics["prediction_change_rate"], 0.5)
+
     def test_full_checkpoint_restores_model_optimizer_and_progress(self):
         config = ExperimentConfig()
         model = nn.Linear(3, 2)
