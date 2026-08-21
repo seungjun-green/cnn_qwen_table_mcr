@@ -27,6 +27,7 @@ from src.wtq_evaluation import (
     OfficialTarget,
     check_denotation,
     normalize_wtq_string,
+    load_official_targets,
     score_prediction,
     split_prediction_items,
     to_wtq_values,
@@ -302,6 +303,20 @@ class ComponentTests(unittest.TestCase):
             "New York, NY",
             "Boston",
         ])
+
+    def test_official_target_loader_falls_back_when_canonical_field_is_missing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            tagged_path = Path(temporary_directory) / "sample.tagged"
+            tagged_path.write_text(
+                "id\ttargetValue\ttargetCanon\n"
+                "good\t2\t2.0\n"
+                "short\tanswer\n",
+                encoding="utf-8",
+            )
+            targets = load_official_targets(temporary_directory)
+        self.assertEqual(targets["good"].canonical_strings, ("2.0",))
+        self.assertEqual(targets["short"].canonical_strings, ("answer",))
+        self.assertTrue(score_prediction("answer", targets["short"]))
 
     def test_truncation_audit_only_counts_answers_removed_by_truncation(self):
         targets = {

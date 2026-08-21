@@ -175,16 +175,37 @@ def load_official_targets(tagged_data_dir: str | Path) -> dict[str, OfficialTarg
     if not files:
         raise FileNotFoundError(f"No .tagged files found under {tagged_data_dir}")
     targets: dict[str, OfficialTarget] = {}
+    canonical_fallbacks = 0
     for path in files:
         with path.open("r", encoding="utf-8", newline="") as handle:
             for row in csv.DictReader(handle, delimiter="\t"):
-                originals = _tsv_unescape_list(row["targetValue"])
-                canonicals = _tsv_unescape_list(row["targetCanon"])
-                targets[row["id"]] = OfficialTarget(
+                example_id = row.get("id")
+                raw_targets = row.get("targetValue")
+                if not example_id or raw_targets is None:
+                    continue
+                originals = _tsv_unescape_list(raw_targets)
+                raw_canonicals = row.get("targetCanon")
+                if raw_canonicals is None:
+                    # A small number of rows in the released tagged files are
+                    # shorter than their header. The official raw targets are
+                    # still usable, including directly parseable numbers/dates.
+                    canonicals = originals
+                    canonical_fallbacks += 1
+                else:
+                    canonicals = _tsv_unescape_list(raw_canonicals)
+                    if len(canonicals) != len(originals):
+                        canonicals = originals
+                        canonical_fallbacks += 1
+                targets[example_id] = OfficialTarget(
                     original_strings=originals,
                     canonical_strings=canonicals,
                     values=to_wtq_values(originals, canonicals),
                 )
+    if canonical_fallbacks:
+        print(
+            "Official WTQ metadata: used raw-answer canonical fallback for "
+            f"{canonical_fallbacks} row(s)."
+        )
     return targets
 
 
