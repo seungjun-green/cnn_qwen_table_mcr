@@ -337,8 +337,8 @@ Seeds are set for Python, NumPy, PyTorch, and CUDA. Evaluation uses greedy gener
 ## Colab
 
 For the CNN residual study, open `notebooks/cnn_residual_colab.ipynb`. Enter one
-configuration name per line, or enter `all`. The notebook defaults to the serialized
-LoRA baseline and the mean-pooling middle-layer residual, streams training output,
+configuration name per line, or enter `all`. The notebook defaults to all six
+configurations, streams training output through Colab's native progress renderer,
 and writes every run directly under Google Drive rather than `/content`.
 
 Open `notebooks/colab_runner.ipynb` and run the cells. The repository URL is already
