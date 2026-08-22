@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -213,6 +214,10 @@ def train_model(
 
     accumulation = config.training.gradient_accumulation_steps
     patience = config.training.early_stopping_patience
+    plain_progress = os.environ.get("TABLE_MRC_PLAIN_PROGRESS") == "1"
+    plain_log_every = max(
+        int(os.environ.get("TABLE_MRC_PLAIN_LOG_EVERY", "100")), 1
+    )
     optimizer.zero_grad(set_to_none=True)
     stop_training = False
 
@@ -240,6 +245,7 @@ def train_model(
             total=len(loader),
             initial=resume_batch,
             desc=f"[{run_name}] Train epoch {epoch + 1}/{config.training.epochs}",
+            disable=plain_progress,
         )
         for batch_index, batch in enumerate(progress, start=resume_batch):
             input_ids = batch["input_ids"].to(device)
@@ -323,11 +329,34 @@ def train_model(
                     if mirror_output_dir:
                         mirror_directory(output_dir, mirror_output_dir)
 
-            if (batch_index + 1) % config.training.log_every == 0 or should_step:
+            if (
+                plain_progress
+                and should_step
+                and global_step % plain_log_every == 0
+            ):
+                print(
+                    f"[{run_name}] Train epoch {epoch + 1}/"
+                    f"{config.training.epochs}: batch {batch_index + 1}/"
+                    f"{len(loader)} | loss="
+                    f"{running_loss / max(batches_seen, 1):.4f} | "
+                    f"step={global_step}",
+                    flush=True,
+                )
+            elif not plain_progress and (
+                (batch_index + 1) % config.training.log_every == 0 or should_step
+            ):
                 progress.set_postfix(
                     loss=f"{running_loss / max(batches_seen, 1):.4f}",
                     step=global_step,
                 )
+
+        if plain_progress:
+            print(
+                f"[{run_name}] Train epoch {epoch + 1}/{config.training.epochs} "
+                f"complete | loss={running_loss / max(batches_seen, 1):.4f} | "
+                f"step={global_step}",
+                flush=True,
+            )
 
         epoch_record: dict[str, Any] = {
             "epoch": epoch + 1,

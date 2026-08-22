@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,13 @@ def evaluate_model(
     records: list[dict[str, Any]] = []
     correct = 0
     denotation_correct = 0
-    for batch in tqdm(loader, desc=description):
+    plain_progress = os.environ.get("TABLE_MRC_PLAIN_PROGRESS") == "1"
+    plain_log_every = max(
+        int(os.environ.get("TABLE_MRC_PLAIN_EVAL_EVERY", "250")), 1
+    )
+    for batch_index, batch in enumerate(
+        tqdm(loader, desc=description, disable=plain_progress), start=1
+    ):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         generation_kwargs: dict[str, Any] = {}
@@ -103,6 +110,13 @@ def evaluate_model(
                     "selected_table_rows": selected_shape[0],
                     "selected_table_cols": selected_shape[1],
                 }
+            )
+        if plain_progress and (
+            batch_index % plain_log_every == 0 or batch_index == len(loader)
+        ):
+            print(
+                f"{description}: {batch_index}/{len(loader)} batches evaluated",
+                flush=True,
             )
     total = len(records)
     metrics = {

@@ -340,6 +340,8 @@ For the CNN residual study, open `notebooks/cnn_residual_colab.ipynb`. Enter one
 configuration name per line, or enter `all`. The notebook defaults to all six
 configurations, streams training output through Colab's native progress renderer,
 and writes every run directly under Google Drive rather than `/content`.
+The notebook disables carriage-return `tqdm` bars, which Colab can expand into many
+rows, and prints compact training and validation status lines periodically instead.
 
 Open `notebooks/colab_runner.ipynb` and run the cells. The repository URL is already
 configured. The setup cell safely pulls an existing clone or creates it, installs
