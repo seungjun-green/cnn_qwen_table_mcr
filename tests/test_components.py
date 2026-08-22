@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tempfile
@@ -32,6 +33,12 @@ from src.data import (
     select_table_for_question,
     serialize_answers,
     truncate_table,
+)
+from src.data_efficiency import (
+    condition_name,
+    deterministic_subset_indices,
+    subset_fingerprint,
+    write_data_efficiency_summary,
 )
 from src.diagnostics import build_table_shuffled_examples, table_dependence_metrics
 from src.model import (
@@ -620,6 +627,50 @@ class ComponentTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "one value per selected level"):
             invalid.validate()
+
+    def test_data_efficiency_subsets_are_reproducible_and_nested(self):
+        ten_percent = deterministic_subset_indices(100, 0.10, seed=2026)
+        twenty_five_percent = deterministic_subset_indices(100, 0.25, seed=2026)
+        self.assertEqual(len(ten_percent), 10)
+        self.assertEqual(len(twenty_five_percent), 25)
+        self.assertTrue(set(ten_percent).issubset(twenty_five_percent))
+        self.assertEqual(
+            ten_percent,
+            deterministic_subset_indices(100, 0.10, seed=2026),
+        )
+        self.assertEqual(len(subset_fingerprint(ten_percent)), 64)
+        self.assertEqual(condition_name(0.10, "base"), "wtq_10pct_base")
+
+    def test_data_efficiency_summary_computes_paired_delta(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fingerprint = "same-subset"
+            for initialization, score in (("base", 0.40), ("curriculum", 0.46)):
+                run_dir = root / f"wtq_10pct_{initialization}"
+                run_dir.mkdir()
+                metadata = {
+                    "wtq_fraction": 0.10,
+                    "wtq_percentage": 10,
+                    "initialization": initialization,
+                    "training_examples": 10,
+                    "subset_fingerprint": fingerprint,
+                }
+                history = {
+                    "primary_metric": "denotation_accuracy",
+                    "status": "completed",
+                    "epochs": [
+                        {
+                            "epoch": 1,
+                            "validation": {"denotation_accuracy": score},
+                        }
+                    ],
+                }
+                (run_dir / "run_metadata.json").write_text(json.dumps(metadata))
+                (run_dir / "history.json").write_text(json.dumps(history))
+            rows = write_data_efficiency_summary(root)
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertAlmostEqual(row["curriculum_delta_vs_base"], 0.06)
 
     def test_serialized_cnn_residual_aligns_cells_and_backpropagates(self):
         tokenizer = DummyTokenizer()

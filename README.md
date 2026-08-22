@@ -419,6 +419,23 @@ Before the full run, the notebook invokes `scripts/smoke_curriculum.py` to verif
 five CSVs, answer-only masking, one training step, one WTQ evaluation example, and
 checkpoint save/reload.
 
+### WTQ data-efficiency comparison
+
+Open `notebooks/run_wtq_data_efficiency_colab.ipynb` to compare two controlled
+initializations on the same labeled WTQ subsets:
+
+- zero-initialized Qwen LoRA → WTQ 10% or 25%;
+- normalized synthetic Level 3 LoRA → the identical WTQ 10% or 25% subset.
+
+The subset seed is fixed, the 10% indices are nested inside the 25% indices, and a
+SHA-256 fingerprint prevents a paired comparison when the subsets differ. All four
+runs use the same WTQ training seed, optimizer settings, validation split, official
+denotation metric, and early-stopping rule. Each condition saves directly under
+`outputs/wtq_data_efficiency` on Drive and resumes independently from
+`checkpoint_last.pt`. Combined results are written to
+`results/data_efficiency_results.csv` and `.json`; the reported
+`curriculum_delta_vs_base` is the controlled data-efficiency effect.
+
 For the graph experiment, open `notebooks/gnn_residual_colab.ipynb`. It compares the
 serialized LoRA baseline, the best early-injection CNN result, and the relational GNN
 residual. Existing baseline and CNN checkpoints are reused, while the new GNN run is
@@ -569,6 +586,7 @@ src/model.py             CNN, GNN, continuous-prefix, serialized, and structured
 src/table_gnn.py         typed row, column, and header message passing
 src/synthetic_curriculum.py  synthetic CSV, SFT formatting, and mixture loading
 src/curriculum.py        sequential training, resume state, evaluation, and results
+src/data_efficiency.py   reproducible paired WTQ subsets and comparison summaries
 src/train.py             training loop and run artifacts
 src/evaluate.py          deterministic Exact Match and denotation evaluation
 src/wtq_evaluation.py    official WTQ value matching and coverage audits
