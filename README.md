@@ -436,6 +436,28 @@ denotation metric, and early-stopping rule. Each condition saves directly under
 `results/data_efficiency_results.csv` and `.json`; the reported
 `curriculum_delta_vs_base` is the controlled data-efficiency effect.
 
+### Two-stage GNN residual pretraining
+
+Open `notebooks/run_gnn_synthetic_pretrain_wtq_colab.ipynb` to train the relational
+GNN experiment in two continuous stages. Stage 1 parses every synthetic Markdown
+table back into structured headers and rows, creates the same token-to-cell alignment
+used by WTQ, and jointly trains LoRA plus the cell encoder, row/column/type
+embeddings, relational GNN, projector, and residual gate through Levels 1–5. Stage 2
+loads the final Level 5 trainable state and continues training all of those components
+on the full WTQ training split. The pretrained Qwen backbone stays frozen throughout.
+
+The runner verifies that both LoRA and GNN-residual parameter groups are trainable,
+evaluates official WTQ denotation accuracy after every synthetic level and WTQ epoch,
+and saves the stages independently under:
+
+```text
+outputs/gnn_synthetic_pretrain_wtq/stage_1_synthetic/
+outputs/gnn_synthetic_pretrain_wtq/stage_2_wtq/
+```
+
+Both stages have direct-Drive mid-epoch checkpoints. Rerunning the notebook restores
+Stage 1 first, then resumes or skips the WTQ stage as appropriate.
+
 For the graph experiment, open `notebooks/gnn_residual_colab.ipynb`. It compares the
 serialized LoRA baseline, the best early-injection CNN result, and the relational GNN
 residual. Existing baseline and CNN checkpoints are reused, while the new GNN run is

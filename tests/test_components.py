@@ -54,6 +54,7 @@ from src.synthetic_curriculum import (
     SyntheticSFTCollator,
     build_mixed_dataset,
     load_all_synthetic_levels,
+    load_all_synthetic_mrc_levels,
     normalize_synthetic_prompt_to_wtq,
 )
 from src.table_gnn import RelationalTableGNN
@@ -559,6 +560,33 @@ class ComponentTests(unittest.TestCase):
             self.assertTrue(all(row["prompt_format"] == "wtq_serialized" for row in records))
             self.assertTrue(all(row["prompt"].startswith("Table:\n") for row in records))
             self.assertTrue(all("\n| ---" not in row["prompt"] for row in records))
+
+    def test_synthetic_curriculum_builds_cell_aligned_mrc_examples(self):
+        levels = load_all_synthetic_mrc_levels(".")
+        for level, examples in levels.items():
+            self.assertEqual(len(examples), 200)
+            self.assertTrue(all(example["question"] for example in examples))
+            self.assertTrue(all(example["answers"] for example in examples))
+            self.assertTrue(all(example["table"]["header"] for example in examples))
+            self.assertTrue(all(example["table"]["rows"] for example in examples))
+            self.assertTrue(
+                all(example["curriculum_level"] == str(level) for example in examples)
+            )
+
+        tokenizer = DummyTokenizer()
+        collator = MRCBatchCollator(
+            tokenizer,
+            experiment_type="serialized_gnn_residual",
+            max_rows=32,
+            max_cols=8,
+            max_question_tokens=4096,
+            max_answer_tokens=128,
+            training=True,
+            answer_mode="all",
+        )
+        batch = collator([levels[1][0]])
+        self.assertTrue(batch["table_cell_indices"].ge(0).any())
+        self.assertEqual(batch["gold_answers"][0], levels[1][0]["answers"])
 
     def test_synthetic_sft_masks_prompt_and_mixed_ratio_is_configurable(self):
         tokenizer = DummyTokenizer()

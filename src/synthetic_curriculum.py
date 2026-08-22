@@ -40,6 +40,17 @@ class SFTRecordDataset(Dataset):
 
 def normalize_synthetic_prompt_to_wtq(prompt: str) -> str:
     """Convert a curriculum Markdown table prompt to the WTQ serializer format."""
+    header, rows, question = parse_synthetic_markdown_prompt(prompt)
+    serialized_table = "\n".join(
+        [" | ".join(header), *(" | ".join(row) for row in rows)]
+    )
+    return f"Table:\n{serialized_table}\n\nQuestion: {question}"
+
+
+def parse_synthetic_markdown_prompt(
+    prompt: str,
+) -> tuple[list[str], list[list[str]], str]:
+    """Recover a structured table and question from a synthetic CSV prompt."""
     table_marker = "Table:\n"
     question_marker = "\n\nQuestion:"
     table_start = prompt.find(table_marker)
@@ -54,7 +65,7 @@ def normalize_synthetic_prompt_to_wtq(prompt: str) -> str:
     if not markdown_table or not question:
         raise ValueError("Synthetic prompt contains an empty table or question")
 
-    serialized_rows: list[str] = []
+    parsed_rows: list[list[str]] = []
     for line in markdown_table.splitlines():
         line = line.strip()
         if not line:
@@ -64,12 +75,14 @@ def normalize_synthetic_prompt_to_wtq(prompt: str) -> str:
         cells = [cell.strip() for cell in line[1:-1].split("|")]
         if cells and all(MARKDOWN_SEPARATOR.fullmatch(cell) for cell in cells):
             continue
-        serialized_rows.append(" | ".join(cells))
+        parsed_rows.append(cells)
 
-    if len(serialized_rows) < 2:
+    if len(parsed_rows) < 2:
         raise ValueError("Synthetic prompt table must contain a header and data row")
-    serialized_table = "\n".join(serialized_rows)
-    return f"Table:\n{serialized_table}\n\nQuestion: {question}"
+    header, *rows = parsed_rows
+    if not header or any(len(row) != len(header) for row in rows):
+        raise ValueError("Synthetic prompt table rows have inconsistent widths")
+    return header, rows, question
 
 
 def load_synthetic_level(
@@ -115,6 +128,40 @@ def load_all_synthetic_levels(
 ) -> dict[int, list[dict[str, str]]]:
     return {
         level: load_synthetic_level(data_root, level, normalize_wtq_format)
+        for level in range(1, 6)
+    }
+
+
+def load_synthetic_mrc_level(
+    data_root: str | Path,
+    level: int,
+) -> list[dict[str, Any]]:
+    """Load synthetic CSV rows as structured examples for CNN/GNN residual models."""
+    records = load_synthetic_level(data_root, level, normalize_wtq_format=False)
+    examples: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        header, rows, question = parse_synthetic_markdown_prompt(record["prompt"])
+        examples.append(
+            {
+                "id": str(record.get("id") or f"synthetic-l{level}-{index}"),
+                "question": question,
+                "answers": [str(record["answer"])],
+                "table": {"header": header, "rows": rows},
+                "source": "synthetic",
+                "curriculum_level": str(level),
+                "task_type": str(
+                    record.get("task_type") or record.get("operation") or "unknown"
+                ),
+            }
+        )
+    return examples
+
+
+def load_all_synthetic_mrc_levels(
+    data_root: str | Path,
+) -> dict[int, list[dict[str, Any]]]:
+    return {
+        level: load_synthetic_mrc_level(data_root, level)
         for level in range(1, 6)
     }
 

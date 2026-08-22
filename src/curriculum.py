@@ -20,12 +20,14 @@ from .checkpointing import (
     trainable_state_dict,
 )
 from .config import ExperimentConfig
+from .data import CELL_ALIGNED_RESIDUAL_EXPERIMENTS, MRCBatchCollator
 from .evaluate import evaluate_model
 from .synthetic_curriculum import (
     SFTRecordDataset,
     SyntheticSFTCollator,
     build_mixed_dataset,
     load_all_synthetic_levels,
+    load_all_synthetic_mrc_levels,
     wtq_training_records,
 )
 from .utils import write_json
@@ -218,15 +220,43 @@ class CurriculumRunner:
         if not self.parameters:
             raise ValueError("Curriculum SFT requires trainable LoRA parameters")
         self.optimizer = self._new_optimizer()
-        self.collator = SyntheticSFTCollator(
-            tokenizer,
-            run_config.max_sequence_length,
-            run_config.max_answer_tokens,
+        self.cell_aligned_synthetic = (
+            experiment_config.experiment_type in CELL_ALIGNED_RESIDUAL_EXPERIMENTS
         )
-        self.synthetic_levels = load_all_synthetic_levels(
-            run_config.data_root,
-            normalize_wtq_format=run_config.normalize_synthetic_format,
-        )
+        if self.cell_aligned_synthetic:
+            if run_config.run_mixed_phase:
+                raise ValueError(
+                    "The generic mixed phase is not supported for structured "
+                    "CNN/GNN synthetic curriculum records"
+                )
+            self.collator = MRCBatchCollator(
+                tokenizer=tokenizer,
+                experiment_type=experiment_config.experiment_type,
+                max_rows=experiment_config.data.max_rows,
+                max_cols=experiment_config.data.max_cols,
+                max_question_tokens=experiment_config.data.max_question_tokens,
+                max_answer_tokens=run_config.max_answer_tokens,
+                training=True,
+                answer_mode=experiment_config.data.answer_mode,
+                answer_separator=experiment_config.data.answer_separator,
+                table_selection=experiment_config.data.table_selection,
+                selection_neighbor_radius=(
+                    experiment_config.data.selection_neighbor_radius
+                ),
+            )
+            self.synthetic_levels = load_all_synthetic_mrc_levels(
+                run_config.data_root
+            )
+        else:
+            self.collator = SyntheticSFTCollator(
+                tokenizer,
+                run_config.max_sequence_length,
+                run_config.max_answer_tokens,
+            )
+            self.synthetic_levels = load_all_synthetic_levels(
+                run_config.data_root,
+                normalize_wtq_format=run_config.normalize_synthetic_format,
+            )
         if run_config.max_examples_per_level is not None:
             if run_config.max_examples_per_level < 1:
                 raise ValueError("max_examples_per_level must be positive")
@@ -438,11 +468,18 @@ class CurriculumRunner:
                     dtype=torch.bfloat16,
                     enabled=use_autocast,
                 ):
+                    model_kwargs: dict[str, Any] = {}
+                    if self.cell_aligned_synthetic:
+                        model_kwargs["tables"] = batch["tables"]
+                        model_kwargs["table_cell_indices"] = batch[
+                            "table_cell_indices"
+                        ].to(self.device)
                     output = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         labels=labels,
                         use_cache=False,
+                        **model_kwargs,
                     )
                     raw_loss = output.loss
                     loss = raw_loss / accumulation
