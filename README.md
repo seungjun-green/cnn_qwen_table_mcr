@@ -356,6 +356,45 @@ Seeds are set for Python, NumPy, PyTorch, and CUDA. Evaluation uses greedy gener
 
 ## Colab
 
+### Synthetic reasoning curriculum
+
+Open `notebooks/run_synthetic_curriculum_colab.ipynb` for the sequential synthetic
+SFT experiment. The repository includes `dataset_level_1.csv` through
+`dataset_level_5.csv`, each containing 200 `prompt`/`answer` examples. The runner
+keeps one continuous Qwen3 LoRA trajectory and measures official WTQ validation
+denotation accuracy at Base, L1, L2, L3, L4, and L5.
+
+The pure curriculum can also be launched directly:
+
+```bash
+python scripts/run_curriculum.py \
+  --data-root . \
+  --output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/synthetic_curriculum \
+  --epochs-per-level 3 \
+  --learning-rate 5e-5
+```
+
+It saves `checkpoint_last.pt` during training and an independently loadable
+checkpoint under `checkpoints/base` and every `checkpoints/level_N` directory.
+Machine-readable results are written to:
+
+```text
+results/curriculum_results.csv
+results/curriculum_results.json
+results/curriculum_summary.json
+results/experiment_config.json
+```
+
+The optional mixed phase is enabled with `--run-mixed-phase`; its synthetic:WTQ
+sampling weights are controlled by `--synthetic-ratio` and `--wtq-ratio`. It is kept
+separate in `results/mixed_result.json`. The WTQ test split is never used for stage
+selection. Add `--run-final-test` only after reviewing validation results; the saved
+`final_test.json` prevents a rerun from repeatedly evaluating test.
+
+Before the full run, the notebook invokes `scripts/smoke_curriculum.py` to verify all
+five CSVs, answer-only masking, one training step, one WTQ evaluation example, and
+checkpoint save/reload.
+
 For the graph experiment, open `notebooks/gnn_residual_colab.ipynb`. It compares the
 serialized LoRA baseline, the best early-injection CNN result, and the relational GNN
 residual. Existing baseline and CNN checkpoints are reused, while the new GNN run is
@@ -504,6 +543,8 @@ src/cross_attention.py   gated multi-head cross-attention
 src/checkpointing.py     atomic full-state save and resume
 src/model.py             CNN, GNN, continuous-prefix, serialized, and structured models
 src/table_gnn.py         typed row, column, and header message passing
+src/synthetic_curriculum.py  synthetic CSV, SFT formatting, and mixture loading
+src/curriculum.py        sequential training, resume state, evaluation, and results
 src/train.py             training loop and run artifacts
 src/evaluate.py          deterministic Exact Match and denotation evaluation
 src/wtq_evaluation.py    official WTQ value matching and coverage audits

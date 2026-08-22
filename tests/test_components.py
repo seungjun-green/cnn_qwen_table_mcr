@@ -18,6 +18,12 @@ from src.checkpointing import (
     save_training_checkpoint,
 )
 from src.config import ExperimentConfig, load_config
+from src.curriculum import (
+    CurriculumRunConfig,
+    curriculum_signature,
+    load_curriculum_checkpoint,
+    save_curriculum_checkpoint,
+)
 from src.data import (
     MRCBatchCollator,
     Table,
@@ -37,6 +43,11 @@ from src.model import (
     build_model,
 )
 from src.pooling import TokenPooler
+from src.synthetic_curriculum import (
+    SyntheticSFTCollator,
+    build_mixed_dataset,
+    load_all_synthetic_levels,
+)
 from src.table_gnn import RelationalTableGNN
 from src.train import train_model
 from src.utils import mirror_directory
@@ -505,6 +516,65 @@ class ComponentTests(unittest.TestCase):
         for path in Path("configs").glob("*.yaml"):
             config = load_config(path)
             self.assertGreater(config.data.max_rows, 0)
+
+    def test_repository_synthetic_curriculum_files_are_valid(self):
+        levels = load_all_synthetic_levels(".")
+        self.assertEqual(set(levels), {1, 2, 3, 4, 5})
+        for level, records in levels.items():
+            self.assertEqual(len(records), 200)
+            self.assertTrue(all(record["prompt"].strip() for record in records))
+            self.assertTrue(all(record["answer"].strip() for record in records))
+            self.assertTrue(
+                all(record["curriculum_level"] == str(level) for record in records)
+            )
+
+    def test_synthetic_sft_masks_prompt_and_mixed_ratio_is_configurable(self):
+        tokenizer = DummyTokenizer()
+        collator = SyntheticSFTCollator(
+            tokenizer, max_sequence_length=64, max_answer_tokens=8
+        )
+        batch = collator(
+            [{"id": "s1", "prompt": "Table: x Question: y", "answer": "yes"}]
+        )
+        supervised = batch["labels"][0].ne(-100)
+        self.assertGreater(int(supervised.sum()), 1)
+        first_supervised = int(supervised.nonzero()[0])
+        self.assertTrue(torch.all(batch["labels"][0, :first_supervised].eq(-100)))
+        synthetic = [{"id": f"a{index}", "source": "synthetic"} for index in range(3)]
+        wtq = [{"id": f"b{index}", "source": "wtq"} for index in range(3)]
+        mixed = build_mixed_dataset(synthetic, wtq, (25, 75), seed=42, total_examples=20)
+        sources = [mixed[index]["source"] for index in range(len(mixed))]
+        self.assertEqual(sources.count("synthetic"), 5)
+        self.assertEqual(sources.count("wtq"), 15)
+
+    def test_curriculum_checkpoint_restores_trainable_state_and_progress(self):
+        experiment_config = ExperimentConfig(experiment_type="serialized")
+        run_config = CurriculumRunConfig(data_root=".", output_dir="unused")
+        signature = curriculum_signature(experiment_config, run_config)
+        model = nn.Linear(3, 2)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        model(torch.ones(1, 3)).sum().backward()
+        optimizer.step()
+        expected = model.weight.detach().clone()
+        state = {"phase": "curriculum", "next_level": 3}
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "checkpoint.pt"
+            save_curriculum_checkpoint(
+                path,
+                model,
+                optimizer,
+                state,
+                signature,
+                experiment_config,
+                run_config,
+            )
+            with torch.no_grad():
+                model.weight.zero_()
+            restored = load_curriculum_checkpoint(
+                path, model, optimizer, signature, torch.device("cpu")
+            )
+        self.assertTrue(torch.equal(model.weight, expected))
+        self.assertEqual(restored["next_level"], 3)
 
     def test_serialized_cnn_residual_aligns_cells_and_backpropagates(self):
         tokenizer = DummyTokenizer()
