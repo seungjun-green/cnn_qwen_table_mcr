@@ -49,6 +49,7 @@ class CurriculumRunConfig:
     checkpoint_every_steps: int = 25
     log_every_steps: int = 25
     seed: int = 42
+    normalize_synthetic_format: bool = False
     run_mixed_phase: bool = False
     synthetic_to_wtq_ratio: tuple[int, int] = (25, 75)
     mixed_epochs: int = 1
@@ -222,7 +223,10 @@ class CurriculumRunner:
             run_config.max_sequence_length,
             run_config.max_answer_tokens,
         )
-        self.synthetic_levels = load_all_synthetic_levels(run_config.data_root)
+        self.synthetic_levels = load_all_synthetic_levels(
+            run_config.data_root,
+            normalize_wtq_format=run_config.normalize_synthetic_format,
+        )
         if run_config.max_examples_per_level is not None:
             if run_config.max_examples_per_level < 1:
                 raise ValueError("max_examples_per_level must be positive")

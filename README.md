@@ -369,6 +369,11 @@ For the targeted extra-Level-2 ablation, open
 epoch schedule `3, 6, 3, 3`, omits Level 5, and stores the independent run under
 `outputs/synthetic_curriculum_l2_6` on Drive.
 
+Open `notebooks/run_synthetic_curriculum_wtq_format_colab.ipynb` for the controlled
+prompt-format ablation. It keeps the CSV files unchanged, removes the synthetic
+Markdown separator row and outer pipes at load time, and trains with the exact
+`Table:\nheader | ...\nrow | ...\n\nQuestion: ...` serialization used for WTQ.
+
 The pure curriculum can also be launched directly:
 
 ```bash
@@ -388,6 +393,10 @@ python scripts/run_curriculum.py \
   --levels 1 2 3 4 \
   --epochs-per-level 3 6 3 3
 ```
+
+Add `--normalize-synthetic-format` to opt into WTQ-compatible synthetic prompts.
+Because this option changes the training input and checkpoint signature, use a new
+output directory instead of an existing curriculum directory.
 
 It saves `checkpoint_last.pt` during training and an independently loadable
 checkpoint under `checkpoints/base` and every `checkpoints/level_N` directory.

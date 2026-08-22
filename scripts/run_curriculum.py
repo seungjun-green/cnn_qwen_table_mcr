@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every-steps", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-validation-examples", type=int, default=None)
+    parser.add_argument(
+        "--normalize-synthetic-format",
+        action="store_true",
+        help="Render synthetic Markdown tables with the same serializer as WTQ",
+    )
     parser.add_argument("--run-mixed-phase", action="store_true")
     parser.add_argument("--synthetic-ratio", type=int, default=25)
     parser.add_argument("--wtq-ratio", type=int, default=75)
@@ -105,6 +110,7 @@ def main() -> None:
         checkpoint_every_steps=args.checkpoint_every_steps,
         log_every_steps=args.log_every_steps,
         seed=args.seed,
+        normalize_synthetic_format=args.normalize_synthetic_format,
         run_mixed_phase=args.run_mixed_phase,
         synthetic_to_wtq_ratio=(args.synthetic_ratio, args.wtq_ratio),
         mixed_epochs=args.mixed_epochs,
@@ -117,6 +123,14 @@ def main() -> None:
     dtype = model_dtype(device, experiment_config.training.bf16)
     print(f"Device: {device}; dtype: {dtype}", flush=True)
     print(f"Git commit: {_git_commit()}", flush=True)
+    print(
+        "Curriculum: "
+        f"levels={list(run_config.levels)} | "
+        f"epochs={list(run_config.level_epoch_schedule())} | "
+        "synthetic_format="
+        f"{'wtq_serialized' if run_config.normalize_synthetic_format else 'original'}",
+        flush=True,
+    )
     tokenizer = load_tokenizer(experiment_config)
     dataset = load_wtq(
         experiment_config.data.dataset, experiment_config.data.revision

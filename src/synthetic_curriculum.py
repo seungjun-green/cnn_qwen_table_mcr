@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -23,6 +24,7 @@ from .data import (
 SYNTHETIC_FILENAMES = tuple(
     f"dataset_level_{level}.csv" for level in range(1, 6)
 )
+MARKDOWN_SEPARATOR = re.compile(r"^:?-{3,}:?$")
 
 
 class SFTRecordDataset(Dataset):
@@ -36,8 +38,44 @@ class SFTRecordDataset(Dataset):
         return self.records[index]
 
 
+def normalize_synthetic_prompt_to_wtq(prompt: str) -> str:
+    """Convert a curriculum Markdown table prompt to the WTQ serializer format."""
+    table_marker = "Table:\n"
+    question_marker = "\n\nQuestion:"
+    table_start = prompt.find(table_marker)
+    question_start = prompt.find(question_marker, table_start + len(table_marker))
+    if table_start < 0 or question_start < 0:
+        raise ValueError("Synthetic prompt must contain Table and Question sections")
+
+    markdown_table = prompt[
+        table_start + len(table_marker) : question_start
+    ].strip()
+    question = prompt[question_start + len(question_marker) :].strip()
+    if not markdown_table or not question:
+        raise ValueError("Synthetic prompt contains an empty table or question")
+
+    serialized_rows: list[str] = []
+    for line in markdown_table.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not (line.startswith("|") and line.endswith("|")):
+            raise ValueError(f"Expected a Markdown table row, received: {line!r}")
+        cells = [cell.strip() for cell in line[1:-1].split("|")]
+        if cells and all(MARKDOWN_SEPARATOR.fullmatch(cell) for cell in cells):
+            continue
+        serialized_rows.append(" | ".join(cells))
+
+    if len(serialized_rows) < 2:
+        raise ValueError("Synthetic prompt table must contain a header and data row")
+    serialized_table = "\n".join(serialized_rows)
+    return f"Table:\n{serialized_table}\n\nQuestion: {question}"
+
+
 def load_synthetic_level(
-    data_root: str | Path, level: int
+    data_root: str | Path,
+    level: int,
+    normalize_wtq_format: bool = False,
 ) -> list[dict[str, str]]:
     if level not in range(1, 6):
         raise ValueError("Synthetic curriculum level must be between 1 and 5")
@@ -58,15 +96,27 @@ def load_synthetic_level(
         for field in ("prompt", "answer"):
             if not str(record.get(field, "")).strip():
                 raise ValueError(f"{path}:{row_index} has an empty {field!r} field")
+        if normalize_wtq_format:
+            try:
+                record["prompt"] = normalize_synthetic_prompt_to_wtq(record["prompt"])
+            except ValueError as error:
+                raise ValueError(f"{path}:{row_index}: {error}") from error
         record["source"] = "synthetic"
         record["curriculum_level"] = str(level)
+        record["prompt_format"] = (
+            "wtq_serialized" if normalize_wtq_format else "synthetic_markdown"
+        )
     return records
 
 
 def load_all_synthetic_levels(
     data_root: str | Path,
+    normalize_wtq_format: bool = False,
 ) -> dict[int, list[dict[str, str]]]:
-    return {level: load_synthetic_level(data_root, level) for level in range(1, 6)}
+    return {
+        level: load_synthetic_level(data_root, level, normalize_wtq_format)
+        for level in range(1, 6)
+    }
 
 
 def synthetic_level_summary(records: Sequence[dict[str, str]]) -> dict[str, Any]:

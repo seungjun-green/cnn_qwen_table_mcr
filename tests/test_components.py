@@ -47,6 +47,7 @@ from src.synthetic_curriculum import (
     SyntheticSFTCollator,
     build_mixed_dataset,
     load_all_synthetic_levels,
+    normalize_synthetic_prompt_to_wtq,
 )
 from src.table_gnn import RelationalTableGNN
 from src.train import train_model
@@ -527,6 +528,30 @@ class ComponentTests(unittest.TestCase):
             self.assertTrue(
                 all(record["curriculum_level"] == str(level) for record in records)
             )
+
+    def test_synthetic_markdown_is_normalized_to_wtq_serialization(self):
+        prompt = (
+            "Answer using the table.\n\n"
+            "Table:\n"
+            "| Name | Score |\n"
+            "| --- | --- |\n"
+            "| Alice | 10 |\n"
+            "| Bob | 20 |\n\n"
+            "Question: Who has 20 points?"
+        )
+        normalized = normalize_synthetic_prompt_to_wtq(prompt)
+        self.assertEqual(
+            normalized,
+            "Table:\nName | Score\nAlice | 10\nBob | 20\n\n"
+            "Question: Who has 20 points?",
+        )
+        self.assertNotIn("---", normalized)
+
+        levels = load_all_synthetic_levels(".", normalize_wtq_format=True)
+        for records in levels.values():
+            self.assertTrue(all(row["prompt_format"] == "wtq_serialized" for row in records))
+            self.assertTrue(all(row["prompt"].startswith("Table:\n") for row in records))
+            self.assertTrue(all("\n| ---" not in row["prompt"] for row in records))
 
     def test_synthetic_sft_masks_prompt_and_mixed_ratio_is_configurable(self):
         tokenizer = DummyTokenizer()
