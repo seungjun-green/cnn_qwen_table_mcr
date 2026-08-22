@@ -74,6 +74,19 @@ serialized tokens belonging to that cell. A zero-initialized learned gate contro
 the residual, and the frozen Qwen backbone, LoRA adapters, and CNN path retain the
 same training objective as the serialized baseline.
 
+The relational GNN experiment keeps that same cell-aligned residual interface but
+replaces local convolutions with typed graph message passing:
+
+```text
+serialized question + table → Qwen layers ───────────────────────→ answer
+                              early hidden state + GNN residual  ↑
+table cells → pooled embeddings → row/column/header graph → GNN ┘
+```
+
+Each cell is a graph node. Same-row, same-column, and header-to-body links use
+separate learned transformations, so their meanings are not collapsed into one edge
+type. Learned row, column, and header/body embeddings retain absolute grid position.
+
 ## Quick start
 
 Python 3.10+ and an NVIDIA GPU are recommended. The baseline targets an H100 and
@@ -126,6 +139,13 @@ Run the first serialized-versus-CNN-residual comparison:
 ```bash
 python scripts/smoke_test.py --config configs/cnn_residual_mean_middle.yaml
 python scripts/run_experiment.py --config configs/cnn_residual_mean_middle.yaml
+```
+
+Run the relational GNN residual:
+
+```bash
+python scripts/smoke_test.py --config configs/gnn_residual_relational_early.yaml
+python scripts/run_experiment.py --config configs/gnn_residual_relational_early.yaml
 ```
 
 Evaluate a saved checkpoint on validation:
@@ -336,6 +356,11 @@ Seeds are set for Python, NumPy, PyTorch, and CUDA. Evaluation uses greedy gener
 
 ## Colab
 
+For the graph experiment, open `notebooks/gnn_residual_colab.ipynb`. It compares the
+serialized LoRA baseline, the best early-injection CNN result, and the relational GNN
+residual. Existing baseline and CNN checkpoints are reused, while the new GNN run is
+saved directly to its own Google Drive directory.
+
 For the CNN residual study, open `notebooks/cnn_residual_colab.ipynb`. Enter one
 configuration name per line, or enter `all`. The notebook defaults to all six
 configurations, streams training output through Colab's native progress renderer,
@@ -477,7 +502,8 @@ src/cell_encoder.py      batched cell encoding and MLP
 src/table_cnn.py         masked 2D CNN and projector
 src/cross_attention.py   gated multi-head cross-attention
 src/checkpointing.py     atomic full-state save and resume
-src/model.py             CNN, continuous-prefix, serialized, and structured-2D models
+src/model.py             CNN, GNN, continuous-prefix, serialized, and structured models
+src/table_gnn.py         typed row, column, and header message passing
 src/train.py             training loop and run artifacts
 src/evaluate.py          deterministic Exact Match and denotation evaluation
 src/wtq_evaluation.py    official WTQ value matching and coverage audits

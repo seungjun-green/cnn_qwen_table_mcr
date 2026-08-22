@@ -65,6 +65,8 @@ def architecture_signature(config: ExperimentConfig) -> str:
         relevant["structure_2d"] = config_dict["structure_2d"]
     if config.experiment_type == "serialized_cnn_residual":
         relevant["cnn_residual"] = config_dict["cnn_residual"]
+    if config.experiment_type == "serialized_gnn_residual":
+        relevant["gnn"] = config_dict["gnn"]
     if config.evaluation.primary_metric != "exact_match":
         relevant["primary_metric"] = config.evaluation.primary_metric
     payload = json.dumps(relevant, sort_keys=True, separators=(",", ":"))

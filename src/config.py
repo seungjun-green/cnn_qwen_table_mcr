@@ -87,6 +87,20 @@ class CNNResidualConfig:
 
 
 @dataclass
+class GNNConfig:
+    depth: int = 2
+    dropout: float = 0.05
+    insertion_layer: int = 8
+    gate_init: float = 0.0
+    use_row_edges: bool = True
+    use_column_edges: bool = True
+    use_header_edges: bool = True
+    use_row_embeddings: bool = True
+    use_column_embeddings: bool = True
+    use_cell_type_embeddings: bool = True
+
+
+@dataclass
 class EvaluationConfig:
     primary_metric: str = "exact_match"
     official_data_dir: str | None = None
@@ -133,6 +147,7 @@ class ExperimentConfig:
     lora: LoRAConfig = field(default_factory=LoRAConfig)
     structure_2d: Structure2DConfig = field(default_factory=Structure2DConfig)
     cnn_residual: CNNResidualConfig = field(default_factory=CNNResidualConfig)
+    gnn: GNNConfig = field(default_factory=GNNConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     generation: GenerationConfig = field(default_factory=GenerationConfig)
@@ -147,6 +162,7 @@ class ExperimentConfig:
             "serialized",
             "structured_2d",
             "serialized_cnn_residual",
+            "serialized_gnn_residual",
         }
         if self.experiment_type not in supported_experiments:
             choices = ", ".join(sorted(supported_experiments))
@@ -199,6 +215,22 @@ class ExperimentConfig:
             raise ValueError("cnn_residual.gate_init must be in [0, 1)")
         if not 0 <= self.cnn_residual.dropout < 1:
             raise ValueError("cnn_residual.dropout must be in [0, 1)")
+        if self.gnn.depth not in {1, 2, 3, 4}:
+            raise ValueError("gnn.depth must be 1, 2, 3, or 4")
+        if not 0 <= self.gnn.dropout < 1:
+            raise ValueError("gnn.dropout must be in [0, 1)")
+        if self.gnn.insertion_layer < 0:
+            raise ValueError("gnn.insertion_layer cannot be negative")
+        if not 0 <= self.gnn.gate_init < 1:
+            raise ValueError("gnn.gate_init must be in [0, 1)")
+        if not any(
+            (
+                self.gnn.use_row_edges,
+                self.gnn.use_column_edges,
+                self.gnn.use_header_edges,
+            )
+        ):
+            raise ValueError("At least one GNN edge relation must be enabled")
         if self.evaluation.primary_metric not in {
             "exact_match",
             "denotation_accuracy",
@@ -231,6 +263,7 @@ _SECTIONS: dict[str, type[Any]] = {
     "lora": LoRAConfig,
     "structure_2d": Structure2DConfig,
     "cnn_residual": CNNResidualConfig,
+    "gnn": GNNConfig,
     "evaluation": EvaluationConfig,
     "training": TrainingConfig,
     "generation": GenerationConfig,

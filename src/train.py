@@ -252,7 +252,10 @@ def train_model(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
             model_kwargs: dict[str, Any] = {}
-            if config.experiment_type == "serialized_cnn_residual":
+            if config.experiment_type in {
+                "serialized_cnn_residual",
+                "serialized_gnn_residual",
+            }:
                 model_kwargs["table_cell_indices"] = batch[
                     "table_cell_indices"
                 ].to(device)

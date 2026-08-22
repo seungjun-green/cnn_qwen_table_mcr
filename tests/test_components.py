@@ -31,11 +31,13 @@ from src.diagnostics import build_table_shuffled_examples, table_dependence_metr
 from src.model import (
     ContinuousPrefixQwen,
     SerializedCNNResidualQwen,
+    SerializedGNNResidualQwen,
     Structured2DQwen,
     TableCNNQwen,
     build_model,
 )
 from src.pooling import TokenPooler
+from src.table_gnn import RelationalTableGNN
 from src.train import train_model
 from src.utils import mirror_directory
 from src.wtq_evaluation import (
@@ -566,6 +568,75 @@ class ComponentTests(unittest.TestCase):
         )
         output.loss.backward()
         for module in [model.cell_encoder, model.table_cnn, model.projector]:
+            gradients = [
+                parameter.grad
+                for parameter in module.parameters()
+                if parameter.requires_grad and parameter.grad is not None
+            ]
+            self.assertTrue(gradients)
+            self.assertTrue(
+                any(torch.count_nonzero(gradient).item() for gradient in gradients)
+            )
+        self.assertIsNotNone(model.residual_gate.grad)
+        generated = model.generate(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            tables=batch["tables"],
+            table_cell_indices=batch["table_cell_indices"],
+            max_new_tokens=2,
+        )
+        self.assertEqual(generated.shape[1], batch["input_ids"].shape[1] + 2)
+
+    def test_relational_table_gnn_builds_typed_edges_and_masks_padding(self):
+        cell_mask = torch.tensor(
+            [[[1, 1], [1, 1], [1, 1], [0, 0]]], dtype=torch.bool
+        )
+        relations = RelationalTableGNN.relation_adjacencies(cell_mask)
+        self.assertEqual(int(relations["row"].sum()), 6)
+        self.assertEqual(int(relations["column"].sum()), 4)
+        self.assertEqual(int(relations["header"].sum()), 8)
+        gnn = RelationalTableGNN(hidden_size=8, depth=2, dropout=0.0)
+        output = gnn(torch.randn(1, 4, 2, 8), cell_mask)
+        self.assertEqual(tuple(output.shape), (1, 4, 2, 8))
+        self.assertTrue(torch.equal(output[:, 3], torch.zeros_like(output[:, 3])))
+
+    def test_serialized_gnn_residual_backpropagates_through_typed_graph(self):
+        tokenizer = DummyTokenizer()
+        config = ExperimentConfig(experiment_type="serialized_gnn_residual")
+        config.data.max_rows = 4
+        config.data.max_cols = 3
+        config.data.max_cell_tokens = 4
+        config.data.max_question_tokens = 128
+        config.cell_encoder.cell_dim = 128
+        config.cell_encoder.mlp_type = "deep"
+        config.cell_encoder.deep_hidden_dim = 256
+        config.gnn.depth = 2
+        config.gnn.insertion_layer = 1
+        config.gnn.gate_init = 0.1
+        model = SerializedGNNResidualQwen(DummyLM(), tokenizer, config)
+        example = {
+            "question": "which value",
+            "answers": ["yes"],
+            "table": {"header": ["name", "value"], "rows": [["x", "yes"]]},
+        }
+        batch = MRCBatchCollator(
+            tokenizer,
+            "serialized_gnn_residual",
+            4,
+            3,
+            128,
+            8,
+            training=True,
+        )([example])
+        output = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            labels=batch["labels"],
+            tables=batch["tables"],
+            table_cell_indices=batch["table_cell_indices"],
+        )
+        output.loss.backward()
+        for module in [model.cell_encoder, model.table_gnn, model.projector]:
             gradients = [
                 parameter.grad
                 for parameter in module.parameters()

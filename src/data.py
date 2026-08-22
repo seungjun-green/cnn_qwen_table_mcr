@@ -23,6 +23,10 @@ STRUCTURED_2D_SYSTEM_PROMPT = (
     "this conversation. Answer the user's question using that table. Return only "
     "the final answer; separate multiple answer items with |."
 )
+CELL_ALIGNED_RESIDUAL_EXPERIMENTS = {
+    "serialized_cnn_residual",
+    "serialized_gnn_residual",
+}
 
 
 @dataclass(frozen=True)
@@ -292,7 +296,7 @@ def build_serialized_prompt_with_cell_alignment(
         # Slow/custom tokenizers without offset mappings can still run the
         # serialized model, but cannot safely align repeated cell values.
         raise TypeError(
-            "serialized_cnn_residual requires a fast tokenizer with "
+            "Cell-aligned residual models require a fast tokenizer with "
             "return_offsets_mapping support"
         )
     input_ids, offsets = encoded
@@ -365,7 +369,9 @@ def build_prompt_ids(
     max_cols: int = 8,
     enable_thinking: bool | None = None,
 ) -> list[int]:
-    if experiment_type in {"serialized", "serialized_cnn_residual"}:
+    if experiment_type == "serialized" or experiment_type in (
+        CELL_ALIGNED_RESIDUAL_EXPERIMENTS
+    ):
         text_table = serialize_table(table, max_rows, max_cols)
         question = f"Table:\n{text_table}\n\nQuestion: {question}"
         return _prompt_ids(
@@ -449,7 +455,7 @@ class MRCBatchCollator:
                 "continuous_prefix",
                 "serialized",
                 "structured_2d",
-                "serialized_cnn_residual",
+                *CELL_ALIGNED_RESIDUAL_EXPERIMENTS,
             }
             and enable_thinking is None
             else enable_thinking
@@ -485,7 +491,7 @@ class MRCBatchCollator:
             answers = extract_answers(example)
             if self.training and not answers:
                 raise ValueError("Training example has no answer")
-            if self.experiment_type == "serialized_cnn_residual":
+            if self.experiment_type in CELL_ALIGNED_RESIDUAL_EXPERIMENTS:
                 prompt, prompt_alignment = build_serialized_prompt_with_cell_alignment(
                     self.tokenizer,
                     question,

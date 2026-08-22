@@ -98,6 +98,23 @@ def main() -> None:
             f"gate_init={config.cnn_residual.gate_init}",
             flush=True,
         )
+    if config.experiment_type == "serialized_gnn_residual":
+        edge_types = [
+            name
+            for name, enabled in (
+                ("row", config.gnn.use_row_edges),
+                ("column", config.gnn.use_column_edges),
+                ("header", config.gnn.use_header_edges),
+            )
+            if enabled
+        ]
+        print(
+            f"GNN RESIDUAL: pooling={config.cell_encoder.pooling} | "
+            f"depth={config.gnn.depth} | relations={','.join(edge_types)} | "
+            f"after_layer={config.gnn.insertion_layer + 1} | "
+            f"gate_init={config.gnn.gate_init}",
+            flush=True,
+        )
     print(
         f"VALIDATION:  primary_metric={config.evaluation.primary_metric}",
         flush=True,

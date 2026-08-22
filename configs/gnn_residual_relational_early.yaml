@@ -1,0 +1,67 @@
+experiment_type: serialized_gnn_residual
+
+model:
+  name: Qwen/Qwen3-1.7B
+  freeze_backbone: true
+
+data:
+  dataset: stanfordnlp/wikitablequestions
+  revision: refs/pr/4
+  max_rows: 32
+  max_cols: 8
+  max_cell_tokens: 32
+  max_question_tokens: 4096
+  max_answer_tokens: 128
+  answer_mode: all
+  answer_separator: " | "
+  table_selection: leading
+
+cell_encoder:
+  pooling: mean
+  cell_dim: 128
+  mlp_type: deep
+  deep_hidden_dim: 256
+
+gnn:
+  depth: 2
+  dropout: 0.05
+  insertion_layer: 8
+  gate_init: 0.0
+  use_row_edges: true
+  use_column_edges: true
+  use_header_edges: true
+  use_row_embeddings: true
+  use_column_embeddings: true
+  use_cell_type_embeddings: true
+
+lora:
+  enabled: true
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+  bias: none
+
+evaluation:
+  primary_metric: denotation_accuracy
+
+training:
+  bf16: true
+  batch_size: 1
+  eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1.0e-4
+  epochs: 10
+  seed: 42
+  checkpoint_every_steps: 100
+  early_stopping_patience: 1
+  early_stopping_min_delta: 0.0
+  auto_resume: true
+  output_dir: outputs/gnn_residual_relational_early
+
+generation:
+  max_new_tokens: 64

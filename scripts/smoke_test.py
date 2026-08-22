@@ -26,6 +26,7 @@ from src.data import (
 from src.model import (
     ContinuousPrefixQwen,
     SerializedCNNResidualQwen,
+    SerializedGNNResidualQwen,
     Structured2DQwen,
     TableCNNQwen,
     build_model,
@@ -74,6 +75,7 @@ def main() -> None:
         "serialized",
         "structured_2d",
         "serialized_cnn_residual",
+        "serialized_gnn_residual",
     }
     if config.experiment_type not in supported_types:
         raise ValueError(
@@ -128,7 +130,7 @@ def main() -> None:
         )
         if residual_prompt != baseline_prompt:
             raise AssertionError(
-                "CNN residual prompt tokens differ from the serialized baseline"
+                "Structural residual prompt tokens differ from the serialized baseline"
             )
         print(
             "Aligned serialized table tokens: "
@@ -150,8 +152,13 @@ def main() -> None:
         memory, memory_mask, shapes = model.encode_tables(batch["tables"])
         if "cell_grid" in shapes:
             print(f"After cell MLP: {shapes['cell_grid']}")
+        if "cnn_output" in shapes:
             print(f"After 2D CNN: {shapes['cnn_output']}")
             print(f"Flattened CNN memory: {shapes['flattened_cnn']}")
+        if "gnn_output" in shapes:
+            print(f"After relational GNN: {shapes['gnn_output']}")
+            print(f"Graph nodes: {shapes['graph_nodes']}")
+        if "table_memory" in shapes:
             print(f"Projected table memory: {shapes['table_memory']}")
         if "table_tokens" in shapes:
             print(f"Structured table tokens: {shapes['table_tokens']}")
@@ -176,7 +183,14 @@ def main() -> None:
         raise AssertionError(f"Loss is not finite: {loss}")
     print(f"Loss: {float(loss.detach().float()):.8f}")
     loss.backward()
-    if isinstance(model, SerializedCNNResidualQwen):
+    if isinstance(model, SerializedGNNResidualQwen):
+        if float(torch.tanh(model.residual_gate).detach().float()) == 0.0:
+            assert_parameter_gradient("GNN residual gate", model.residual_gate)
+        else:
+            assert_gradient("cell encoder", model.cell_encoder)
+            assert_gradient("GNN", model.table_gnn)
+            assert_gradient("projector", model.projector)
+    elif isinstance(model, SerializedCNNResidualQwen):
         if float(torch.tanh(model.residual_gate).detach().float()) == 0.0:
             assert_parameter_gradient("CNN residual gate", model.residual_gate)
         else:
