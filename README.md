@@ -252,7 +252,7 @@ Disconnect-safe training controls are also configurable:
 ```yaml
 training:
   checkpoint_every_steps: 100
-  early_stopping_patience: 3
+  early_stopping_patience: 1
   early_stopping_min_delta: 0.0
   auto_resume: true
 ```

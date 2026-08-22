@@ -107,7 +107,7 @@ class TrainingConfig:
     log_every: int = 20
     eval_every_epochs: int = 1
     checkpoint_every_steps: int = 100
-    early_stopping_patience: int | None = 3
+    early_stopping_patience: int | None = 1
     early_stopping_min_delta: float = 0.0
     auto_resume: bool = True
     resume_from_checkpoint: str | None = None

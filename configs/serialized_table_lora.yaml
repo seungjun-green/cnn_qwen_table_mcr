@@ -39,7 +39,7 @@ training:
   epochs: 10
   seed: 42
   checkpoint_every_steps: 100
-  early_stopping_patience: 3
+  early_stopping_patience: 1
   early_stopping_min_delta: 0.0
   auto_resume: true
   output_dir: outputs/serialized_table_lora
