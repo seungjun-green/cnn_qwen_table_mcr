@@ -364,6 +364,11 @@ SFT experiment. The repository includes `dataset_level_1.csv` through
 keeps one continuous Qwen3 LoRA trajectory and measures official WTQ validation
 denotation accuracy at Base, L1, L2, L3, L4, and L5.
 
+For the targeted extra-Level-2 ablation, open
+`notebooks/run_synthetic_curriculum_l2_6_colab.ipynb`. It runs Levels 1–4 with
+epoch schedule `3, 6, 3, 3`, omits Level 5, and stores the independent run under
+`outputs/synthetic_curriculum_l2_6` on Drive.
+
 The pure curriculum can also be launched directly:
 
 ```bash
@@ -372,6 +377,16 @@ python scripts/run_curriculum.py \
   --output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/synthetic_curriculum \
   --epochs-per-level 3 \
   --learning-rate 5e-5
+```
+
+Pass one epoch count per selected level to use a non-uniform schedule:
+
+```bash
+python scripts/run_curriculum.py \
+  --data-root . \
+  --output-dir /content/drive/MyDrive/cnn_qwen_table_mcr/outputs/synthetic_curriculum_l2_6 \
+  --levels 1 2 3 4 \
+  --epochs-per-level 3 6 3 3
 ```
 
 It saves `checkpoint_last.pt` during training and an independently loadable

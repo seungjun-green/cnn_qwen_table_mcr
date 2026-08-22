@@ -576,6 +576,26 @@ class ComponentTests(unittest.TestCase):
         self.assertTrue(torch.equal(model.weight, expected))
         self.assertEqual(restored["next_level"], 3)
 
+    def test_curriculum_supports_level_specific_epoch_schedule(self):
+        run_config = CurriculumRunConfig(
+            data_root=".",
+            output_dir="unused",
+            levels=(1, 2, 3, 4),
+            epochs_per_level=(3, 6, 3, 3),
+        )
+        run_config.validate()
+        self.assertEqual(run_config.level_epoch_schedule(), (3, 6, 3, 3))
+        self.assertEqual(run_config.epochs_for_level(2), 6)
+
+        invalid = CurriculumRunConfig(
+            data_root=".",
+            output_dir="unused",
+            levels=(1, 2, 3, 4),
+            epochs_per_level=(3, 6),
+        )
+        with self.assertRaisesRegex(ValueError, "one value per selected level"):
+            invalid.validate()
+
     def test_serialized_cnn_residual_aligns_cells_and_backpropagates(self):
         tokenizer = DummyTokenizer()
         config = ExperimentConfig(experiment_type="serialized_cnn_residual")

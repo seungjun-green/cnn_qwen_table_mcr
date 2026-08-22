@@ -38,7 +38,7 @@ class CurriculumRunConfig:
     data_root: str
     output_dir: str
     levels: tuple[int, ...] = (1, 2, 3, 4, 5)
-    epochs_per_level: int = 3
+    epochs_per_level: int | tuple[int, ...] = 3
     learning_rate: float = 5.0e-5
     weight_decay: float = 0.01
     batch_size: int = 1
@@ -61,7 +61,6 @@ class CurriculumRunConfig:
         if tuple(sorted(set(self.levels))) != self.levels:
             raise ValueError("levels must be unique and ordered")
         for name in (
-            "epochs_per_level",
             "batch_size",
             "gradient_accumulation_steps",
             "max_sequence_length",
@@ -71,10 +70,31 @@ class CurriculumRunConfig:
         ):
             if int(getattr(self, name)) < 1:
                 raise ValueError(f"{name} must be positive")
+        schedule = self.level_epoch_schedule()
+        if any(epochs < 1 for epochs in schedule):
+            raise ValueError("epochs_per_level values must be positive")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if self.checkpoint_every_steps < 0:
             raise ValueError("checkpoint_every_steps cannot be negative")
+
+    def level_epoch_schedule(self) -> tuple[int, ...]:
+        if isinstance(self.epochs_per_level, int):
+            return (self.epochs_per_level,) * len(self.levels)
+        schedule = tuple(int(value) for value in self.epochs_per_level)
+        if len(schedule) != len(self.levels):
+            raise ValueError(
+                "epochs_per_level must contain one value per selected level; "
+                f"received {len(schedule)} epoch values for {len(self.levels)} levels"
+            )
+        return schedule
+
+    def epochs_for_level(self, level: int) -> int:
+        try:
+            position = self.levels.index(level)
+        except ValueError as error:
+            raise ValueError(f"Level {level} is not part of this curriculum") from error
+        return self.level_epoch_schedule()[position]
 
 
 def curriculum_signature(
@@ -494,7 +514,7 @@ class CurriculumRunner:
             self._train_stage(
                 stage,
                 SFTRecordDataset(self.synthetic_levels[level]),
-                self.run_config.epochs_per_level,
+                self.run_config.epochs_for_level(level),
                 level,
             )
             self._save(self._stage_checkpoint(stage))

@@ -37,7 +37,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--official-cache-dir", default=None)
     parser.add_argument("--levels", nargs="+", type=int, default=[1, 2, 3, 4, 5])
-    parser.add_argument("--epochs-per-level", type=int, default=3)
+    parser.add_argument(
+        "--epochs-per-level",
+        nargs="+",
+        type=int,
+        default=[3],
+        help=(
+            "One shared epoch count, or one count per selected level "
+            "(for example: --levels 1 2 3 4 --epochs-per-level 3 6 3 3)"
+        ),
+    )
     parser.add_argument("--learning-rate", type=float, default=5.0e-5)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
@@ -82,7 +91,11 @@ def main() -> None:
         data_root=args.data_root,
         output_dir=args.output_dir,
         levels=tuple(args.levels),
-        epochs_per_level=args.epochs_per_level,
+        epochs_per_level=(
+            args.epochs_per_level[0]
+            if len(args.epochs_per_level) == 1
+            else tuple(args.epochs_per_level)
+        ),
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
